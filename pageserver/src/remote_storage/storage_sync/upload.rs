@@ -14,7 +14,7 @@ use crate::{
     remote_storage::{
         storage_sync::{
             compression,
-            index::{RemoteTimeline, TimelineIndexEntry},
+            index::{FullTimelineIndexEntry, RemoteTimeline, TimelineIndexEntry},
             sync_queue, tenant_branch_files, update_index_description, SyncKind, SyncTask,
         },
         RemoteStorage, ZTenantTimelineId,
@@ -35,7 +35,7 @@ pub(super) async fn upload_timeline_checkpoint<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     config: &'static PageServerConf,
-    remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
+    remote_assets: Arc<(S, Arc<RwLock<RemoteTimelineIndex>>)>,
     sync_id: ZTenantTimelineId,
     new_checkpoint: NewCheckpoint,
     retries: u32,
@@ -67,10 +67,19 @@ pub(super) async fn upload_timeline_checkpoint<
     let index_read = index.read().await;
     let remote_timeline = match index_read.timeline_entry(&sync_id) {
         None => None,
-        Some(TimelineIndexEntry::Full(remote_timeline)) => Some(Cow::Borrowed(remote_timeline)),
-        Some(TimelineIndexEntry::Description(_)) => {
+        Some(TimelineIndexEntry::Full(full_entry)) => {
+            Some(Cow::Borrowed(&full_entry.remote_timeline))
+        }
+        Some(TimelineIndexEntry::Description(description_entry)) => {
             debug!("Found timeline description for the given ids, downloading the full index");
-            match update_index_description(remote_assets.as_ref(), &timeline_dir, sync_id).await {
+            match update_index_description(
+                remote_assets.as_ref(),
+                &timeline_dir,
+                sync_id,
+                description_entry.awaits_download,
+            )
+            .await
+            {
                 Ok(remote_timeline) => Some(Cow::Owned(remote_timeline)),
                 Err(e) => {
                     error!("Failed to download full timeline index: {:?}", e);
@@ -114,8 +123,8 @@ pub(super) async fn upload_timeline_checkpoint<
         Ok((archive_header, header_size)) => {
             let mut index_write = index.write().await;
             match index_write.timeline_entry_mut(&sync_id) {
-                Some(TimelineIndexEntry::Full(remote_timeline)) => {
-                    remote_timeline.update_archive_contents(
+                Some(TimelineIndexEntry::Full(full_entry)) => {
+                    full_entry.remote_timeline.update_archive_contents(
                         new_checkpoint.metadata.disk_consistent_lsn(),
                         archive_header,
                         header_size,
@@ -128,7 +137,13 @@ pub(super) async fn upload_timeline_checkpoint<
                         archive_header,
                         header_size,
                     );
-                    index_write.add_timeline_entry(sync_id, TimelineIndexEntry::Full(new_timeline));
+                    index_write.add_timeline_entry(
+                        sync_id,
+                        TimelineIndexEntry::Full(FullTimelineIndexEntry {
+                            remote_timeline: new_timeline,
+                            awaits_download: false, // TODO (current) we need to preserve awaits_download value
+                        }),
+                    );
                 }
             }
             debug!("Checkpoint uploaded successfully");
@@ -154,7 +169,7 @@ async fn try_upload_checkpoint<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     config: &'static PageServerConf,
-    remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
+    remote_assets: Arc<(S, Arc<RwLock<RemoteTimelineIndex>>)>,
     sync_id: ZTenantTimelineId,
     new_checkpoint: &NewCheckpoint,
     files_to_skip: BTreeSet<PathBuf>,
@@ -206,7 +221,7 @@ async fn upload_missing_branches<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     config: &'static PageServerConf,
-    (storage, index): &(S, RwLock<RemoteTimelineIndex>),
+    (storage, index): &(S, Arc<RwLock<RemoteTimelineIndex>>),
     tenant_id: ZTenantId,
 ) -> anyhow::Result<()> {
     let local_branches = tenant_branch_files(config, tenant_id)
@@ -297,13 +312,15 @@ mod tests {
         let repo_harness = RepoHarness::create("reupload_timeline")?;
         let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = RwLock::new(RemoteTimelineIndex::try_parse_descriptions_from_paths(
-            repo_harness.conf,
-            storage
-                .list()
-                .await?
-                .into_iter()
-                .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+        let index = Arc::new(RwLock::new(
+            RemoteTimelineIndex::try_parse_descriptions_from_paths(
+                repo_harness.conf,
+                storage
+                    .list()
+                    .await?
+                    .into_iter()
+                    .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+            ),
         ));
         let remote_assets = Arc::new((storage, index));
         let index = &remote_assets.1;
@@ -493,13 +510,15 @@ mod tests {
         let repo_harness = RepoHarness::create("reupload_timeline_rejected")?;
         let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = RwLock::new(RemoteTimelineIndex::try_parse_descriptions_from_paths(
-            repo_harness.conf,
-            storage
-                .list()
-                .await?
-                .into_iter()
-                .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+        let index = Arc::new(RwLock::new(
+            RemoteTimelineIndex::try_parse_descriptions_from_paths(
+                repo_harness.conf,
+                storage
+                    .list()
+                    .await?
+                    .into_iter()
+                    .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+            ),
         ));
         let remote_assets = Arc::new((storage, index));
         let storage = &remote_assets.0;

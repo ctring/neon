@@ -21,10 +21,10 @@ use zenith_utils::logging;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
-use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{config::PageServerConf, repository::Repository};
 use crate::{import_datadir, LOG_FILE_NAME};
+use crate::{remote_storage::RemoteTimelineIndex, walredo::WalRedoManager};
 use crate::{repository::RepositoryTimeline, tenant_mgr};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -35,7 +35,9 @@ pub struct BranchInfo {
     pub latest_valid_lsn: Lsn,
     pub ancestor_id: Option<String>,
     pub ancestor_lsn: Option<String>,
-    pub current_logical_size: usize,
+    // can be absent for unloaded timeline. maybe we should keep it in the metadata, bur recalculate it on the start
+    // because there were problems with incremental calculation in presence of pageserver restarts
+    pub current_logical_size: Option<usize>,
     pub current_logical_size_non_incremental: Option<usize>,
 }
 
@@ -56,39 +58,63 @@ impl BranchInfo {
             })?
             .parse::<ZTimelineId>()?;
 
-        let timeline = match repo.get_timeline(timeline_id)? {
-            RepositoryTimeline::Local(local_entry) => local_entry,
-            RepositoryTimeline::Remote { .. } => {
-                bail!("Timeline {} is remote, no branches to display", timeline_id)
+        let timeline = repo
+            .get_timeline(timeline_id)
+            .ok_or(anyhow::anyhow!("unknown timeline {}", timeline_id))?;
+
+        let branch_info = match timeline {
+            RepositoryTimeline::Loaded(timeline) => {
+                // non incremental size calculation can be heavy, so let it be optional
+                // needed for tests to check size calculation
+                let current_logical_size_non_incremental = include_non_incremental_logical_size
+                    .then(|| {
+                        timeline.get_current_logical_size_non_incremental(
+                            timeline.get_last_record_lsn(),
+                        )
+                    })
+                    .transpose()?;
+
+                // we use ancestor lsn zero if we don't have an ancestor, so turn this into an option based on timeline id
+                let (ancestor_id, ancestor_lsn) = match timeline.get_ancestor_timeline_id() {
+                    Some(ancestor_id) => (
+                        Some(ancestor_id.to_string()),
+                        Some(timeline.get_ancestor_lsn().to_string()),
+                    ),
+                    None => (None, None),
+                };
+
+                BranchInfo {
+                    name,
+                    timeline_id,
+                    latest_valid_lsn: timeline.get_last_record_lsn(),
+                    ancestor_id,
+                    ancestor_lsn,
+                    current_logical_size: Some(timeline.get_current_logical_size()),
+                    current_logical_size_non_incremental,
+                }
+            }
+            RepositoryTimeline::Unloaded { metadata } => {
+                // TODO is there some generic enough way to avoid this duplication? generic function with common trait?
+                let (ancestor_id, ancestor_lsn) = match metadata.ancestor_timeline() {
+                    Some(ancestor_id) => (
+                        Some(ancestor_id.to_string()),
+                        Some(metadata.ancestor_lsn().to_string()),
+                    ),
+                    None => (None, None),
+                };
+
+                BranchInfo {
+                    name,
+                    timeline_id,
+                    latest_valid_lsn: metadata.disk_consistent_lsn(),
+                    ancestor_id,
+                    ancestor_lsn,
+                    current_logical_size: None,
+                    current_logical_size_non_incremental: None,
+                }
             }
         };
-
-        // we use ancestor lsn zero if we don't have an ancestor, so turn this into an option based on timeline id
-        let (ancestor_id, ancestor_lsn) = match timeline.get_ancestor_timeline_id() {
-            Some(ancestor_id) => (
-                Some(ancestor_id.to_string()),
-                Some(timeline.get_ancestor_lsn().to_string()),
-            ),
-            None => (None, None),
-        };
-
-        // non incremental size calculation can be heavy, so let it be optional
-        // needed for tests to check size calculation
-        let current_logical_size_non_incremental = include_non_incremental_logical_size
-            .then(|| {
-                timeline.get_current_logical_size_non_incremental(timeline.get_last_record_lsn())
-            })
-            .transpose()?;
-
-        Ok(BranchInfo {
-            name,
-            timeline_id,
-            latest_valid_lsn: timeline.get_last_record_lsn(),
-            ancestor_id,
-            ancestor_lsn,
-            current_logical_size: timeline.get_current_logical_size(),
-            current_logical_size_non_incremental,
-        })
+        Ok(branch_info)
     }
 }
 
@@ -118,7 +144,7 @@ pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str
     if let Some(tenantid) = create_tenant {
         let tenantid = ZTenantId::from_str(tenantid)?;
         println!("initializing tenantid {}", tenantid);
-        create_repo(conf, tenantid, dummy_redo_mgr).context("failed to create repo")?;
+        create_repo(conf, tenantid, dummy_redo_mgr, None).context("failed to create repo")?;
     }
     crashsafe_dir::create_dir_all(conf.tenants_path())?;
 
@@ -126,11 +152,20 @@ pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str
     Ok(())
 }
 
+// When no remote index is passed it means that this is temporary instantiation.
+// For example from init_pageserver with create_tenant=True
 pub fn create_repo(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
+    remote_index: Option<Arc<tokio::sync::RwLock<RemoteTimelineIndex>>>,
 ) -> Result<Arc<dyn Repository>> {
+    // safety check, both should be Some or None
+    assert!(
+        (conf.remote_storage_config.is_some() && remote_index.is_some())
+            || (conf.remote_storage_config.is_none() && remote_index.is_none())
+    );
+
     let repo_dir = conf.tenant_path(&tenantid);
     if repo_dir.exists() {
         bail!("repo for {} already exists", tenantid)
@@ -156,6 +191,9 @@ pub fn create_repo(
         conf,
         wal_redo_manager,
         tenantid,
+        remote_index.unwrap_or(Arc::new(tokio::sync::RwLock::new(
+            RemoteTimelineIndex::empty(),
+        ))),
         conf.remote_storage_config.is_some(),
     ));
 
@@ -306,8 +344,7 @@ pub(crate) fn create_branch(
 
     let mut startpoint = parse_point_in_time(conf, startpoint_str, tenantid)?;
     let timeline = repo
-        .get_timeline(startpoint.timelineid)?
-        .local_timeline()
+        .get_timeline_load(startpoint.timelineid)
         .context("Cannot branch off the timeline that's not present locally")?;
     if startpoint.lsn == Lsn(0) {
         // Find end of WAL on the old timeline
@@ -352,7 +389,7 @@ pub(crate) fn create_branch(
         latest_valid_lsn: startpoint.lsn,
         ancestor_id: Some(startpoint.timelineid.to_string()),
         ancestor_lsn: Some(startpoint.lsn.to_string()),
-        current_logical_size: 0,
+        current_logical_size: Some(0),
         current_logical_size_non_incremental: Some(0),
     })
 }

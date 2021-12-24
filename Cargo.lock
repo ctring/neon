@@ -87,6 +87,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b88d82667eca772c4aa12f0f1348b3ae643424c8876448f3f7bd5787032e234c"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "attohttpc"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1291,6 +1300,7 @@ dependencies = [
  "anyhow",
  "async-compression",
  "async-trait",
+ "atomic",
  "bookfile",
  "byteorder",
  "bytes",

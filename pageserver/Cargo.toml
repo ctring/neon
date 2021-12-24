@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+atomic = "0.5"
 bookfile = { git = "https://github.com/zenithdb/bookfile.git", branch="generic-readext" }
 chrono = "0.4.19"
 rand = "0.8.3"

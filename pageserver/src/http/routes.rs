@@ -25,19 +25,28 @@ use zenith_utils::zid::{opt_display_serde, ZTimelineId};
 use super::models::BranchCreateRequest;
 use super::models::TenantCreateRequest;
 use crate::branches::BranchInfo;
+use crate::remote_storage::schedule_timeline_download;
+use crate::remote_storage::RemoteTimelineIndex;
+use crate::repository::LocalTimelineState;
 use crate::repository::RepositoryTimeline;
-use crate::repository::TimelineSyncState;
 use crate::{branches, config::PageServerConf, tenant_mgr, ZTenantId};
+use tokio::sync::RwLock;
+use zenith_utils::zid::ZTenantTimelineId;
 
 #[derive(Debug)]
 struct State {
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
+    remote_index: Arc<RwLock<RemoteTimelineIndex>>,
     allowlist_routes: Vec<Uri>,
 }
 
 impl State {
-    fn new(conf: &'static PageServerConf, auth: Option<Arc<JwtAuth>>) -> Self {
+    fn new(
+        conf: &'static PageServerConf,
+        auth: Option<Arc<JwtAuth>>,
+        remote_index: Arc<RwLock<RemoteTimelineIndex>>,
+    ) -> Self {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
             .map(|v| v.parse().unwrap())
@@ -46,6 +55,7 @@ impl State {
             conf,
             auth,
             allowlist_routes,
+            remote_index,
         }
     }
 }
@@ -191,26 +201,30 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
 }
 
 #[derive(Debug, Serialize)]
+struct LocalTimelineInfo {
+    #[serde(with = "opt_display_serde")]
+    ancestor_timeline_id: Option<ZTimelineId>,
+    last_record_lsn: Lsn,
+    prev_record_lsn: Option<Lsn>,
+    disk_consistent_lsn: Lsn,
+    timeline_state: LocalTimelineState,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteTimelineInfo {
+    remote_consistent_lsn: Option<Lsn>,
+    awaits_download: bool,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "type")]
-enum TimelineInfo {
-    Local {
-        #[serde(with = "hex")]
-        timeline_id: ZTimelineId,
-        #[serde(with = "hex")]
-        tenant_id: ZTenantId,
-        #[serde(with = "opt_display_serde")]
-        ancestor_timeline_id: Option<ZTimelineId>,
-        last_record_lsn: Lsn,
-        prev_record_lsn: Lsn,
-        disk_consistent_lsn: Lsn,
-        timeline_state: Option<TimelineSyncState>,
-    },
-    Remote {
-        #[serde(with = "hex")]
-        timeline_id: ZTimelineId,
-        #[serde(with = "hex")]
-        tenant_id: ZTenantId,
-    },
+struct TimelineInfo {
+    #[serde(with = "hex")]
+    timeline_id: ZTimelineId,
+    #[serde(with = "hex")]
+    tenant_id: ZTenantId,
+    local: Option<LocalTimelineInfo>,
+    remote: Option<RemoteTimelineInfo>,
 }
 
 async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -219,31 +233,65 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
 
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
 
-    let response_data = tokio::task::spawn_blocking(move || {
-        let _enter =
-            info_span!("timeline_detail_handler", tenant = %tenant_id, timeline = %timeline_id)
-                .entered();
+    let span = info_span!("timeline_detail_handler", tenant = %tenant_id, timeline = %timeline_id);
+
+    let (local_timeline_info, span) = tokio::task::spawn_blocking(move || {
+        let entered = span.entered();
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        Ok::<_, anyhow::Error>(match repo.get_timeline(timeline_id)?.local_timeline() {
-            None => TimelineInfo::Remote {
-                timeline_id,
-                tenant_id,
-            },
-            Some(timeline) => TimelineInfo::Local {
-                timeline_id,
-                tenant_id,
-                ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
-                disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
-                last_record_lsn: timeline.get_last_record_lsn(),
-                prev_record_lsn: timeline.get_prev_record_lsn(),
-                timeline_state: repo.get_timeline_state(timeline_id),
-            },
-        })
+        let local_timeline = {
+            repo.get_timeline(timeline_id)
+                .map(|timeline| match timeline {
+                    RepositoryTimeline::Loaded(loaded_timeline) => LocalTimelineInfo {
+                        ancestor_timeline_id: loaded_timeline.get_ancestor_timeline_id(),
+                        disk_consistent_lsn: loaded_timeline.get_disk_consistent_lsn(),
+                        last_record_lsn: loaded_timeline.get_last_record_lsn(),
+                        prev_record_lsn: Some(loaded_timeline.get_prev_record_lsn()),
+                        timeline_state: LocalTimelineState::Loaded(loaded_timeline.get_state()),
+                    },
+                    RepositoryTimeline::Unloaded { metadata } => LocalTimelineInfo {
+                        ancestor_timeline_id: metadata.ancestor_timeline(),
+                        disk_consistent_lsn: metadata.disk_consistent_lsn(),
+                        last_record_lsn: metadata.disk_consistent_lsn(),
+                        prev_record_lsn: metadata.prev_record_lsn(),
+                        timeline_state: LocalTimelineState::Unloaded,
+                    },
+                })
+        };
+        Ok::<_, anyhow::Error>((local_timeline, entered.exit()))
     })
     .await
     .map_err(ApiError::from_err)??;
 
-    Ok(json_response(StatusCode::OK, response_data)?)
+    let remote_timeline_info = {
+        let remote_index_read = get_state(&request).remote_index.read().await;
+        remote_index_read
+            .timeline_entry(&ZTenantTimelineId {
+                tenant_id,
+                timeline_id,
+            })
+            .map(|remote_entry| RemoteTimelineInfo {
+                remote_consistent_lsn: remote_entry.disk_consistent_lsn(),
+                awaits_download: remote_entry.get_awaits_download(),
+            })
+    };
+
+    let _enter = span.entered();
+
+    if local_timeline_info.is_none() && remote_timeline_info.is_none() {
+        return Err(ApiError::NotFound(
+            "Timeline is not found neither locally nor remotely".to_string(),
+        ));
+    }
+
+    Ok(json_response(
+        StatusCode::OK,
+        TimelineInfo {
+            tenant_id,
+            timeline_id,
+            local: local_timeline_info,
+            remote: remote_timeline_info,
+        },
+    )?)
 }
 
 async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -251,30 +299,36 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+    let span = info_span!("timeline_attach_handler", tenant = %tenant_id, timeline = %timeline_id);
 
-    tokio::task::spawn_blocking(move || {
-        let _enter =
-            info_span!("timeline_attach_handler", tenant = %tenant_id, timeline = %timeline_id)
-                .entered();
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        match repo.get_timeline(timeline_id)? {
-            RepositoryTimeline::Local(_) => {
-                anyhow::bail!("Timeline with id {} is already local", timeline_id)
-            }
-            RepositoryTimeline::Remote {
-                id: _,
-                disk_consistent_lsn: _,
-            } => {
-                // FIXME (rodionov) get timeline already schedules timeline for download, and duplicate tasks can cause errors
-                //  first should be fixed in https://github.com/zenithdb/zenith/issues/997
-                // TODO (rodionov) change timeline state to awaits download (incapsulate it somewhere in the repo)
-                // TODO (rodionov) can we safely request replication on the timeline before sync is completed? (can be implemented on top of the #997)
-                Ok(())
-            }
-        }
+    let span = tokio::task::spawn_blocking(move || {
+        let entered = span.entered();
+        if let Ok(_) = tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id) {
+            anyhow::bail!("Timeline is already present locally")
+        };
+        Ok(entered.exit())
     })
     .await
     .map_err(ApiError::from_err)??;
+
+    let mut remote_index_write = get_state(&request).remote_index.write().await;
+
+    let _enter = span.entered(); // entered guard cannot live across awaits (non Send)
+    let index_entry = remote_index_write
+        .timeline_entry_mut(&ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        })
+        .ok_or(ApiError::BadRequest("Unknown remote timeline".to_string()))?;
+
+    if index_entry.get_awaits_download() {
+        return Err(ApiError::NotFound(
+            "Timeline download is already in progress".to_string(),
+        ));
+    }
+
+    index_entry.set_awaits_download(true);
+    schedule_timeline_download(tenant_id, timeline_id);
 
     Ok(json_response(StatusCode::ACCEPTED, ())?)
 }
@@ -317,10 +371,15 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     check_permission(&request, None)?;
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
+    let remote_index = Arc::clone(&get_state(&request).remote_index);
 
     tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = %request_data.tenant_id).entered();
-        tenant_mgr::create_repository_for_tenant(get_config(&request), request_data.tenant_id)
+        tenant_mgr::create_repository_for_tenant(
+            get_config(&request),
+            request_data.tenant_id,
+            remote_index,
+        )
     })
     .await
     .map_err(ApiError::from_err)??;
@@ -337,6 +396,7 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
 pub fn make_router(
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
+    remote_index: Arc<RwLock<RemoteTimelineIndex>>,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");
@@ -352,7 +412,7 @@ pub fn make_router(
     }
 
     router
-        .data(Arc::new(State::new(conf, auth)))
+        .data(Arc::new(State::new(conf, auth, remote_index)))
         .get("/v1/status", status_handler)
         .get("/v1/timeline/:tenant_id", timeline_list_handler)
         .get(
