@@ -110,7 +110,7 @@ pub(super) async fn download_timeline<
             }
         },
     };
-    if let None = remote_timeline.checkpoints().max() {
+    if remote_timeline.checkpoints().max().is_none() {
         debug!("Cannot download: no disk consistent Lsn is present for the remote timeline");
         return DownloadedTimeline::Abort;
     };

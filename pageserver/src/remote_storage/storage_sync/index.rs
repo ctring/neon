@@ -119,10 +119,10 @@ impl RemoteTimelineIndex {
         id: &ZTenantTimelineId,
         awaits_download: bool,
     ) -> anyhow::Result<()> {
-        Ok(self
-            .timeline_entry_mut(id)
-            .ok_or(anyhow::anyhow!("unknown timeline sync {}", id))?
-            .set_awaits_download(awaits_download))
+        self.timeline_entry_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("unknown timeline sync {}", id))?
+            .set_awaits_download(awaits_download);
+        Ok(())
     }
 }
 

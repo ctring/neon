@@ -60,7 +60,7 @@ impl BranchInfo {
 
         let timeline = repo
             .get_timeline(timeline_id)
-            .ok_or(anyhow::anyhow!("unknown timeline {}", timeline_id))?;
+            .ok_or_else(|| anyhow::anyhow!("unknown timeline {}", timeline_id))?;
 
         let branch_info = match timeline {
             RepositoryTimeline::Loaded(timeline) => {
@@ -191,9 +191,8 @@ pub fn create_repo(
         conf,
         wal_redo_manager,
         tenantid,
-        remote_index.unwrap_or(Arc::new(tokio::sync::RwLock::new(
-            RemoteTimelineIndex::empty(),
-        ))),
+        remote_index
+            .unwrap_or_else(|| Arc::new(tokio::sync::RwLock::new(RemoteTimelineIndex::empty()))),
         conf.remote_storage_config.is_some(),
     ));
 

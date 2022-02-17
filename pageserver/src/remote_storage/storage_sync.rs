@@ -790,7 +790,7 @@ async fn update_index_description<
             let mut archive_header_downloads = FuturesUnordered::new();
             for (archive_id, description) in &description_entry.description {
                 archive_header_downloads.push(async move {
-                    let header = download_archive_header(storage, timeline_dir, &description)
+                    let header = download_archive_header(storage, timeline_dir, description)
                         .await
                         .map_err(|e| (e, archive_id))?;
                     Ok((archive_id, description.header_size, header))

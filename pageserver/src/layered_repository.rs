@@ -205,7 +205,7 @@ impl Repository for LayeredRepository {
             .get_timeline_load_internal(src, &mut timelines)
             // message about timeline being remote is one .context up in the stack
             .context("failed to load timeline for branching")?
-            .ok_or(anyhow::anyhow!("unknown timeline id: {}", &src))?;
+            .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {}", &src))?;
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
         src_timeline
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
@@ -298,7 +298,7 @@ impl Repository for LayeredRepository {
         // TODO (rodionov) do we need to compare remote_consisten_lsn with local one and error if pageserver has unstreamed changes?
         //     hould be still ok without that, because safekeeper will keep everything that was not streamed to s3
         let mut timelines = self.timelines.lock().unwrap();
-        if let None = timelines.remove(&timeline_id) {
+        if timelines.remove(&timeline_id).is_none() {
             bail!("cannot detach timeline that is not available locally");
         }
 
@@ -371,14 +371,9 @@ impl LayeredTimelineEntry {
     }
 }
 
-// Usually it is better to implement From rather than Into
-// but in this case it feels right because otherwise addition of new repository type would rquire a new From impl
-// for Repository timeline, so if they are e.g. in different libraries that means that new impl on one library would require
-// changes to the interface declared in other library. So using Into improves modularity.
-// Though this might change if we use associated types and generics instead of trait objects.
-impl Into<RepositoryTimeline> for LayeredTimelineEntry {
-    fn into(self) -> RepositoryTimeline {
-        match self {
+impl From<LayeredTimelineEntry> for RepositoryTimeline {
+    fn from(entry: LayeredTimelineEntry) -> Self {
+        match entry {
             LayeredTimelineEntry::Loaded(timeline) => RepositoryTimeline::Loaded(timeline as _),
             LayeredTimelineEntry::Unloaded { metadata, .. } => {
                 RepositoryTimeline::Unloaded { metadata }

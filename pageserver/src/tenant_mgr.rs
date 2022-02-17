@@ -75,7 +75,7 @@ pub fn load_local_repo(
             conf,
             Arc::new(walredo_mgr),
             tenant_id,
-            Arc::clone(&remote_index),
+            Arc::clone(remote_index),
             conf.remote_storage_config.is_some(),
         ));
         Tenant {

@@ -303,7 +303,7 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
 
     let span = tokio::task::spawn_blocking(move || {
         let entered = span.entered();
-        if let Ok(_) = tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id) {
+        if tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id).is_ok() {
             anyhow::bail!("Timeline is already present locally")
         };
         Ok(entered.exit())
@@ -319,7 +319,7 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
             tenant_id,
             timeline_id,
         })
-        .ok_or(ApiError::BadRequest("Unknown remote timeline".to_string()))?;
+        .ok_or_else(|| ApiError::BadRequest("Unknown remote timeline".to_string()))?;
 
     if index_entry.get_awaits_download() {
         return Err(ApiError::NotFound(
