@@ -23,5 +23,8 @@ serde = { version = "1.0", features = ["derive"] }
 workspace_hack = { path = "../workspace_hack" }
 zenith_utils = { path = "../zenith_utils" }
 
+[dev-dependencies]
+nix = "0.23"
+
 [build-dependencies]
 bindgen = "0.59.1"
