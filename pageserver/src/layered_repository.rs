@@ -14,6 +14,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use bookfile::Book;
 use bytes::Bytes;
+use fail::fail_point;
 use lazy_static::lazy_static;
 use postgres_ffi::pg_constants::BLCKSZ;
 use tracing::*;
@@ -1559,6 +1560,8 @@ impl LayeredTimeline {
         drop(layers);
         drop(write_guard);
 
+        fail_point!("checkpoint-before-sync");
+
         // Create delta/image layers for evicted layers
         for (_evicted_layer_id, evicted_layer) in evicted_layers.iter() {
             let mut this_layer_paths =
@@ -1578,6 +1581,8 @@ impl LayeredTimeline {
 
             layer_paths.pop().unwrap();
         }
+
+        fail_point!("checkpoint-after-sync");
 
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
