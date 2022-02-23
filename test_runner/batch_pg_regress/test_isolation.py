@@ -10,7 +10,9 @@ def test_isolation(zenith_simple_env: ZenithEnv, test_output_dir, pg_bin, capsys
     env.zenith_cli.create_branch("test_isolation", "empty")
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
-    pg = env.postgres.create_start('test_isolation', config_lines=['max_prepared_transactions=100'])
+    pg = env.postgres.create_start(
+        'test_isolation',
+        config_lines=['max_prepared_transactions=100', 'max_replication_write_lag=15MB'])
     pg.safe_psql('CREATE DATABASE isolation_regression')
 
     # Create some local directories for pg_isolation_regress to run in.
