@@ -1606,6 +1606,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
  "tokio-postgres-rustls",

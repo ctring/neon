@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{bail, Context};
 use bytes::BytesMut;
 use pin_project_lite::pin_project;
 use rustls::ServerConfig;
@@ -35,7 +35,7 @@ impl<S> PqStream<S> {
         self.stream
     }
 
-    /// Get a reference to the underlying stream.
+    /// Get a shared reference to the underlying stream.
     pub fn get_ref(&self) -> &S {
         &self.stream
     }
@@ -46,8 +46,8 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
     pub async fn read_startup_packet(&mut self) -> anyhow::Result<FeStartupPacket> {
         match FeStartupPacket::read_fut(&mut self.stream).await? {
             Some(FeMessage::StartupPacket(packet)) => Ok(packet),
-            None => anyhow::bail!("connection is lost"),
-            other => anyhow::bail!("bad message type: {:?}", other),
+            None => bail!("connection is lost"),
+            other => bail!("bad message type: {:?}", other),
         }
     }
 
@@ -79,6 +79,13 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
         self.stream.flush().await?;
         Ok(self)
     }
+
+    /// Write the error message using [`Self::write_message`], then return via [`anyhow::bail`].
+    pub async fn throw_error<T>(&mut self, error: impl ToString) -> anyhow::Result<T> {
+        let msg = error.to_string();
+        self.write_message(&BeMessage::ErrorResponse(&msg)).await?;
+        bail!(msg);
+    }
 }
 
 pin_project! {
@@ -109,7 +116,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Stream<S> {
                 let tls = Box::new(tokio_rustls::TlsAcceptor::from(cfg).accept(raw).await?);
                 Ok(Stream::Tls { tls })
             }
-            Stream::Tls { .. } => anyhow::bail!("can't upgrade TLS stream"),
+            Stream::Tls { .. } => bail!("can't upgrade TLS stream"),
         }
     }
 }

@@ -4,8 +4,17 @@ use crate::cplane_api::{self, CPlaneApi};
 use crate::stream::PqStream;
 use anyhow::{anyhow, bail, Context};
 use std::collections::HashMap;
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use zenith_utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage, FeMessage as Fe};
+
+#[derive(Debug, Error)]
+pub enum AuthError {
+    // Showing the exact reason might have security implications.
+    // TODO: decide if we can expose more information to the client.
+    #[error("Authentication failed")]
+    Generic(#[from] anyhow::Error),
+}
 
 /// Various client credentials which we use for authentication.
 #[derive(Debug, PartialEq, Eq)]
@@ -21,7 +30,7 @@ impl TryFrom<HashMap<String, String>> for ClientCredentials {
         let mut get_param = |key| {
             value
                 .remove(key)
-                .with_context(|| format!("{} is missing in startup packet", key))
+                .with_context(|| format!("`{}` is missing in startup packet", key))
         };
 
         let user = get_param("user")?;
@@ -37,7 +46,7 @@ impl ClientCredentials {
         self,
         config: &ProxyConfig,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-    ) -> anyhow::Result<DatabaseInfo> {
+    ) -> Result<DatabaseInfo, AuthError> {
         use crate::config::ClientAuthMethod::*;
         use crate::config::RouterConfig::*;
         let db_info = match &config.router_config {
@@ -53,7 +62,7 @@ impl ClientCredentials {
             Dynamic(Link) => handle_new_user(config, client).await,
         };
 
-        db_info.context("failed to authenticate client")
+        Ok(db_info.context("failed to authenticate client")?)
     }
 }
 
@@ -77,7 +86,9 @@ async fn handle_static(
         bad => bail!("unexpected message type: {:?}", bad),
     };
 
-    let cleartext_password = std::str::from_utf8(&msg)?.split('\0').next().unwrap();
+    let cleartext_password = std::str::from_utf8(&msg)?
+        .strip_suffix('\0')
+        .context("bad password")?;
 
     let db_info = DatabaseInfo {
         host,
@@ -166,4 +177,23 @@ fn hello_message(redirect_uri: &str, session_id: &str) -> String {
         redirect_uri = redirect_uri,
         session_id = session_id,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_error_is_secure() {
+        let magic = "sensitive_magic_data";
+        let error = AuthError::from(anyhow!(magic));
+
+        // All of these formatting methods should not leak sensitive data
+        assert_eq!(error.to_string(), "Authentication failed");
+        assert_eq!(format!("{}", error), "Authentication failed");
+        assert_eq!(format!("{:#}", error), "Authentication failed");
+
+        // This is probably OK, since we shouldn't send debug info to the client.
+        assert!(format!("{:?}", error).contains(magic));
+    }
 }
