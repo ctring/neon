@@ -822,7 +822,7 @@ class ZenithCli:
         cmd = [
             'timeline',
             'branch',
-            '--name',
+            '--branch-name',
             new_branch_name,
             '--tenant-id',
             (tenant_id or self.env.initial_tenant).hex,
@@ -905,6 +905,7 @@ class ZenithCli:
     def pg_create(
         self,
         branch_name: str,
+        node_name: Optional[str] = None,
         tenant_id: Optional[uuid.UUID] = None,
         lsn: Optional[str] = None,
         port: Optional[int] = None,
@@ -912,21 +913,25 @@ class ZenithCli:
         args = [
             'pg',
             'create',
-            '--tenant-id', (tenant_id or self.env.initial_tenant).hex,
-            '--name',
-            branch_name
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
+            '--branch-name',
+            branch_name,
         ]
         if lsn is not None:
-            args.append(f'--lsn={lsn}')
+            args.extend(['--lsn', lsn])
         if port is not None:
-            args.append(f'--port={port}')
+            args.extend(['--port', str(port)])
+        if node_name is not None:
+            args.append(node_name)
+
         res = self.raw_cli(args)
         res.check_returncode()
         return res
 
     def pg_start(
         self,
-        branch_name: str,
+        node_name: str,
         tenant_id: Optional[uuid.UUID] = None,
         lsn: Optional[str] = None,
         port: Optional[int] = None,
@@ -936,13 +941,13 @@ class ZenithCli:
             'start',
             '--tenant-id',
             (tenant_id or self.env.initial_tenant).hex,
-            '--name',
-            branch_name,
         ]
         if lsn is not None:
             args.append(f'--lsn={lsn}')
         if port is not None:
             args.append(f'--port={port}')
+        if node_name is not None:
+            args.append(node_name)
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -950,19 +955,20 @@ class ZenithCli:
 
     def pg_stop(
         self,
-        branch_name: str,
+        node_name: str,
         tenant_id: Optional[uuid.UUID] = None,
         destroy=False,
     ) -> 'subprocess.CompletedProcess[str]':
         args = [
             'pg',
             'stop',
-            f'--tenant-id={(tenant_id or self.env.initial_tenant).hex}',
-            '--name',
-            branch_name
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
         ]
         if destroy:
             args.append('--destroy')
+        if node_name is not None:
+            args.append(node_name)
 
         return self.raw_cli(args)
 
@@ -1273,14 +1279,15 @@ class Postgres(PgProtocol):
 
         self.env = env
         self.running = False
-        self.branch_name: Optional[str] = None  # dubious, see asserts below
+        self.node_name: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
-        # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<branch_name>/postgresql.conf
+        # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<node_name>/postgresql.conf
 
     def create(
         self,
         branch_name: str,
+        node_name: Optional[str] = None,
         lsn: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
     ) -> 'Postgres':
@@ -1292,12 +1299,13 @@ class Postgres(PgProtocol):
         if not config_lines:
             config_lines = []
 
+        self.node_name = node_name or f'{branch_name}_pg_node'
         self.env.zenith_cli.pg_create(branch_name,
+                                      node_name=self.node_name,
                                       tenant_id=self.tenant_id,
                                       lsn=lsn,
                                       port=self.port)
-        self.branch_name = branch_name
-        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.branch_name
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.node_name
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
 
         if config_lines is None:
@@ -1312,11 +1320,11 @@ class Postgres(PgProtocol):
         Returns self.
         """
 
-        assert self.branch_name is not None
+        assert self.node_name is not None
 
-        log.info(f"Starting postgres node {self.branch_name}")
+        log.info(f"Starting postgres node {self.node_name}")
 
-        run_result = self.env.zenith_cli.pg_start(self.branch_name,
+        run_result = self.env.zenith_cli.pg_start(self.node_name,
                                                   tenant_id=self.tenant_id,
                                                   port=self.port)
         self.running = True
@@ -1327,8 +1335,8 @@ class Postgres(PgProtocol):
 
     def pg_data_dir_path(self) -> str:
         """ Path to data directory """
-        assert self.branch_name
-        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.branch_name
+        assert self.node_name
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.node_name
         return os.path.join(self.env.repo_dir, path)
 
     def pg_xact_dir_path(self) -> str:
@@ -1387,8 +1395,8 @@ class Postgres(PgProtocol):
         """
 
         if self.running:
-            assert self.branch_name is not None
-            self.env.zenith_cli.pg_stop(self.branch_name, self.tenant_id)
+            assert self.node_name is not None
+            self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id)
             self.running = False
 
         return self
@@ -1399,15 +1407,16 @@ class Postgres(PgProtocol):
         Returns self.
         """
 
-        assert self.branch_name is not None
-        self.env.zenith_cli.pg_stop(self.branch_name, self.tenant_id, True)
-        self.branch_name = None
+        assert self.node_name is not None
+        self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id, True)
+        self.node_name = None
 
         return self
 
     def create_start(
         self,
         branch_name: str,
+        node_name: Optional[str] = None,
         lsn: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
     ) -> 'Postgres':
@@ -1419,6 +1428,7 @@ class Postgres(PgProtocol):
 
         self.create(
             branch_name=branch_name,
+            node_name=node_name,
             config_lines=config_lines,
             lsn=lsn,
         ).start()
@@ -1440,7 +1450,8 @@ class PostgresFactory:
         self.instances: List[Postgres] = []
 
     def create_start(self,
-                     branch_name: Optional[str] = None,
+                     branch_name: str,
+                     node_name: Optional[str] = None,
                      tenant_id: Optional[uuid.UUID] = None,
                      lsn: Optional[str] = None,
                      config_lines: Optional[List[str]] = None) -> Postgres:
@@ -1454,13 +1465,15 @@ class PostgresFactory:
         self.instances.append(pg)
 
         return pg.create_start(
-            branch_name=branch_name or self.env.default_branch_name,
+            branch_name=branch_name,
+            node_name=node_name,
             config_lines=config_lines,
             lsn=lsn,
         )
 
     def create(self,
-               branch_name: Optional[str] = None,
+               branch_name: str,
+               node_name: Optional[str] = None,
                tenant_id: Optional[uuid.UUID] = None,
                lsn: Optional[str] = None,
                config_lines: Optional[List[str]] = None) -> Postgres:
@@ -1475,7 +1488,8 @@ class PostgresFactory:
         self.instances.append(pg)
 
         return pg.create(
-            branch_name=branch_name or self.env.default_branch_name,
+            branch_name=branch_name,
+            node_name=node_name,
             lsn=lsn,
             config_lines=config_lines,
         )
@@ -1696,6 +1710,7 @@ def list_files_to_compare(pgdata_dir: str):
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
 def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Postgres):
+
     # Get the timeline ID. We need it for the 'basebackup' command
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -1706,7 +1721,7 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
     pg.stop()
 
     # Take a basebackup from pageserver
-    restored_dir_path = os.path.join(env.repo_dir, f"{pg.branch_name}_restored_datadir")
+    restored_dir_path = os.path.join(env.repo_dir, f"{pg.node_name}_restored_datadir")
     mkdir_if_needed(restored_dir_path)
 
     pg_bin = PgBin(test_output_dir)
