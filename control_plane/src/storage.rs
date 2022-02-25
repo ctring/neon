@@ -324,9 +324,7 @@ impl PageServerNode {
     pub fn tenant_create(&self, tenantid: ZTenantId) -> Result<()> {
         Ok(self
             .http_request(Method::POST, format!("{}/{}", self.http_base_url, "tenant"))
-            .json(&TenantCreateRequest {
-                tenant_id: tenantid,
-            })
+            .json(&TenantCreateRequest::new(tenantid))
             .send()?
             .error_from_body()?
             .json()?)

@@ -2,7 +2,7 @@
 //! page server.
 
 use crate::branches;
-use crate::config::PageServerConf;
+use crate::config::{PageServerConf, TenantConf};
 use crate::layered_repository::LayeredRepository;
 use crate::repository::{Repository, Timeline, TimelineSyncState};
 use crate::thread_mgr;
@@ -80,6 +80,7 @@ pub fn set_timeline_states(
             // Set up an object repository, for actual data storage.
             let repo: Arc<dyn Repository> = Arc::new(LayeredRepository::new(
                 conf,
+                TenantConf::from(conf),
                 Arc::new(walredo_mgr),
                 tenant_id,
                 conf.remote_storage_config.is_some(),
@@ -179,10 +180,11 @@ pub fn shutdown_all_tenants() {
 
 pub fn create_repository_for_tenant(
     conf: &'static PageServerConf,
+    tenant_conf: TenantConf,
     tenantid: ZTenantId,
 ) -> Result<()> {
     let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
-    let repo = branches::create_repo(conf, tenantid, wal_redo_manager)?;
+    let repo = branches::create_repo(conf, tenant_conf, tenantid, wal_redo_manager)?;
 
     match access_tenants().entry(tenantid) {
         hash_map::Entry::Occupied(_) => bail!("tenant {} already exists", tenantid),
@@ -205,7 +207,7 @@ pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
 /// Change the state of a tenant to Active and launch its checkpointer and GC
 /// threads. If the tenant was already in Active state or Stopping, does nothing.
 ///
-pub fn activate_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Result<()> {
+pub fn activate_tenant(tenantid: ZTenantId) -> Result<()> {
     let mut m = access_tenants();
     let tenant = m
         .get_mut(&tenantid)
@@ -224,7 +226,7 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Re
                 Some(tenantid),
                 None,
                 "Checkpointer thread",
-                move || crate::tenant_threads::checkpoint_loop(tenantid, conf),
+                move || crate::tenant_threads::checkpoint_loop(tenantid),
             )?;
 
             // FIXME: if we fail to launch the GC thread, but already launched the
@@ -235,7 +237,7 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Re
                 Some(tenantid),
                 None,
                 "GC thread",
-                move || crate::tenant_threads::gc_loop(tenantid, conf),
+                move || crate::tenant_threads::gc_loop(tenantid),
             )?;
 
             tenant.state = TenantState::Active;

@@ -19,6 +19,7 @@ use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::{Arc, RwLockReadGuard};
+use std::time::Duration;
 use tracing::*;
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::auth::{self, JwtAuth};
@@ -697,10 +698,11 @@ impl postgres_backend::Handler for PageServerHandler {
                 .unwrap_or(Ok(self.conf.gc_horizon))?;
 
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            let result = repo.gc_iteration(Some(timelineid), gc_horizon, true)?;
+            let result = repo.gc_iteration(Some(timelineid), gc_horizon, Duration::ZERO, true)?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"layer_relfiles_total"),
                 RowDescriptor::int8_col(b"layer_relfiles_needed_by_cutoff"),
+                RowDescriptor::int8_col(b"layer_relfiles_needed_by_pitr"),
                 RowDescriptor::int8_col(b"layer_relfiles_needed_by_branches"),
                 RowDescriptor::int8_col(b"layer_relfiles_not_updated"),
                 RowDescriptor::int8_col(b"layer_relfiles_needed_as_tombstone"),
@@ -708,6 +710,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 RowDescriptor::int8_col(b"layer_relfiles_dropped"),
                 RowDescriptor::int8_col(b"layer_nonrelfiles_total"),
                 RowDescriptor::int8_col(b"layer_nonrelfiles_needed_by_cutoff"),
+                RowDescriptor::int8_col(b"layer_nonrelfiles_needed_by_pitr"),
                 RowDescriptor::int8_col(b"layer_nonrelfiles_needed_by_branches"),
                 RowDescriptor::int8_col(b"layer_nonrelfiles_not_updated"),
                 RowDescriptor::int8_col(b"layer_nonrelfiles_needed_as_tombstone"),
@@ -723,6 +726,7 @@ impl postgres_backend::Handler for PageServerHandler {
                         .to_string()
                         .as_bytes(),
                 ),
+                Some(result.ondisk_relfiles_needed_by_pitr.to_string().as_bytes()),
                 Some(
                     result
                         .ondisk_relfiles_needed_by_branches
@@ -742,6 +746,12 @@ impl postgres_backend::Handler for PageServerHandler {
                 Some(
                     result
                         .ondisk_nonrelfiles_needed_by_cutoff
+                        .to_string()
+                        .as_bytes(),
+                ),
+                Some(
+                    result
+                        .ondisk_nonrelfiles_needed_by_pitr
                         .to_string()
                         .as_bytes(),
                 ),

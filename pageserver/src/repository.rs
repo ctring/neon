@@ -1,3 +1,4 @@
+use crate::config::TenantConf;
 use crate::relish::*;
 use crate::walrecord::MultiXactMember;
 use crate::CheckpointConfig;
@@ -60,12 +61,15 @@ pub trait Repository: Send + Sync {
         &self,
         timelineid: Option<ZTimelineId>,
         horizon: u64,
+        pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult>;
 
     /// perform one checkpoint iteration, flushing in-memory data on disk.
     /// this function is periodically called by checkponter thread.
     fn checkpoint_iteration(&self, cconf: CheckpointConfig) -> Result<()>;
+
+    fn get_tenant_conf(&self) -> TenantConf;
 }
 
 /// A timeline, that belongs to the current repository.
@@ -132,6 +136,7 @@ impl TimelineSyncState {
 pub struct GcResult {
     pub ondisk_relfiles_total: u64,
     pub ondisk_relfiles_needed_by_cutoff: u64,
+    pub ondisk_relfiles_needed_by_pitr: u64,
     pub ondisk_relfiles_needed_by_branches: u64,
     pub ondisk_relfiles_not_updated: u64,
     pub ondisk_relfiles_needed_as_tombstone: u64,
@@ -140,6 +145,7 @@ pub struct GcResult {
 
     pub ondisk_nonrelfiles_total: u64,
     pub ondisk_nonrelfiles_needed_by_cutoff: u64,
+    pub ondisk_nonrelfiles_needed_by_pitr: u64,
     pub ondisk_nonrelfiles_needed_by_branches: u64,
     pub ondisk_nonrelfiles_not_updated: u64,
     pub ondisk_nonrelfiles_needed_as_tombstone: u64,
@@ -153,6 +159,7 @@ impl AddAssign for GcResult {
     fn add_assign(&mut self, other: Self) {
         self.ondisk_relfiles_total += other.ondisk_relfiles_total;
         self.ondisk_relfiles_needed_by_cutoff += other.ondisk_relfiles_needed_by_cutoff;
+        self.ondisk_relfiles_needed_by_pitr += other.ondisk_relfiles_needed_by_pitr;
         self.ondisk_relfiles_needed_by_branches += other.ondisk_relfiles_needed_by_branches;
         self.ondisk_relfiles_not_updated += other.ondisk_relfiles_not_updated;
         self.ondisk_relfiles_needed_as_tombstone += other.ondisk_relfiles_needed_as_tombstone;
@@ -161,6 +168,7 @@ impl AddAssign for GcResult {
 
         self.ondisk_nonrelfiles_total += other.ondisk_nonrelfiles_total;
         self.ondisk_nonrelfiles_needed_by_cutoff += other.ondisk_nonrelfiles_needed_by_cutoff;
+        self.ondisk_nonrelfiles_needed_by_pitr += other.ondisk_nonrelfiles_needed_by_pitr;
         self.ondisk_nonrelfiles_needed_by_branches += other.ondisk_nonrelfiles_needed_by_branches;
         self.ondisk_nonrelfiles_not_updated += other.ondisk_nonrelfiles_not_updated;
         self.ondisk_nonrelfiles_needed_as_tombstone += other.ondisk_nonrelfiles_needed_as_tombstone;
@@ -400,6 +408,7 @@ pub mod repo_harness {
 
             Box::new(LayeredRepository::new(
                 self.conf,
+                TenantConf::from(self.conf),
                 walredo_mgr,
                 self.tenant_id,
                 false,
@@ -848,7 +857,7 @@ mod tests {
 
         // Run checkpoint and garbage collection and check that it's still not visible
         newtline.checkpoint(CheckpointConfig::Forced)?;
-        repo.gc_iteration(Some(NEW_TIMELINE_ID), 0, true)?;
+        repo.gc_iteration(Some(NEW_TIMELINE_ID), 0, Duration::ZERO, true)?;
 
         assert!(!newtline
             .list_rels(0, TESTDB, Lsn(0x40))?
@@ -966,7 +975,7 @@ mod tests {
         make_some_layers(&tline, Lsn(0x20))?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
         match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
@@ -1014,7 +1023,7 @@ mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         make_some_layers(&tline, Lsn(0x20))?;
 
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
         let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
         assert!(*latest_gc_cutoff_lsn > Lsn(0x25));
         match tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)) {
@@ -1039,7 +1048,7 @@ mod tests {
         };
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
         assert!(newtline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)).is_ok());
 
         Ok(())
@@ -1062,7 +1071,7 @@ mod tests {
         make_some_layers(&newtline, Lsn(0x60))?;
 
         // run gc on parent
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
 
         // check that the layer in parent before the branching point is still there
         let tline_dir = harness.conf.timeline_path(&TIMELINE_ID, &harness.tenant_id);

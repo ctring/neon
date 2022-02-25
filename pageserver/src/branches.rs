@@ -23,7 +23,7 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
-use crate::{config::PageServerConf, repository::Repository};
+use crate::{config::PageServerConf, config::TenantConf, repository::Repository};
 use crate::{import_datadir, LOG_FILE_NAME};
 use crate::{repository::RepositoryTimeline, tenant_mgr};
 
@@ -118,7 +118,8 @@ pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str
     if let Some(tenantid) = create_tenant {
         let tenantid = ZTenantId::from_str(tenantid)?;
         println!("initializing tenantid {}", tenantid);
-        create_repo(conf, tenantid, dummy_redo_mgr).context("failed to create repo")?;
+        create_repo(conf, TenantConf::from(conf), tenantid, dummy_redo_mgr)
+            .context("failed to create repo")?;
     }
     crashsafe_dir::create_dir_all(conf.tenants_path())?;
 
@@ -128,6 +129,7 @@ pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str
 
 pub fn create_repo(
     conf: &'static PageServerConf,
+    tenant_conf: TenantConf,
     tenantid: ZTenantId,
     wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
 ) -> Result<Arc<dyn Repository>> {
@@ -154,6 +156,7 @@ pub fn create_repo(
 
     let repo = Arc::new(crate::layered_repository::LayeredRepository::new(
         conf,
+        tenant_conf,
         wal_redo_manager,
         tenantid,
         conf.remote_storage_config.is_some(),

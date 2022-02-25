@@ -29,10 +29,10 @@ use std::ops::{Bound::Included, Deref};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
-use crate::config::PageServerConf;
+use crate::config::{PageServerConf, TenantConf};
 use crate::page_cache;
 use crate::relish::*;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
@@ -120,6 +120,7 @@ pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 ///
 pub struct LayeredRepository {
     conf: &'static PageServerConf,
+    tenant_conf: TenantConf,
     tenantid: ZTenantId,
     timelines: Mutex<HashMap<ZTimelineId, LayeredTimelineEntry>>,
     // This mutex prevents creation of new timelines during GC.
@@ -136,6 +137,10 @@ pub struct LayeredRepository {
 
 /// Public interface
 impl Repository for LayeredRepository {
+    fn get_tenant_conf(&self) -> TenantConf {
+        self.tenant_conf
+    }
+
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<RepositoryTimeline> {
         let mut timelines = self.timelines.lock().unwrap();
         Ok(
@@ -245,12 +250,13 @@ impl Repository for LayeredRepository {
         &self,
         target_timelineid: Option<ZTimelineId>,
         horizon: u64,
+        pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         STORAGE_TIME
             .with_label_values(&["gc"])
             .observe_closure_duration(|| {
-                self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
+                self.gc_iteration_internal(target_timelineid, horizon, pitr, checkpoint_before_gc)
             })
     }
 
@@ -489,6 +495,7 @@ impl LayeredRepository {
 
     pub fn new(
         conf: &'static PageServerConf,
+        tenant_conf: TenantConf,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenantid: ZTenantId,
         upload_relishes: bool,
@@ -496,6 +503,7 @@ impl LayeredRepository {
         LayeredRepository {
             tenantid,
             conf,
+            tenant_conf,
             timelines: Mutex::new(HashMap::new()),
             gc_cs: Mutex::new(()),
             walredo_mgr,
@@ -578,6 +586,7 @@ impl LayeredRepository {
         &self,
         target_timelineid: Option<ZTimelineId>,
         horizon: u64,
+        pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         let mut totals: GcResult = Default::default();
@@ -691,7 +700,7 @@ impl LayeredRepository {
                     timeline.checkpoint(CheckpointConfig::Forced)?;
                     info!("timeline {} checkpoint_before_gc done", timelineid);
                 }
-                let result = timeline.gc_timeline(branchpoints, cutoff)?;
+                let result = timeline.gc_timeline(branchpoints, cutoff, pitr)?;
 
                 totals += result;
                 timelines = self.timelines.lock().unwrap();
@@ -1681,8 +1690,13 @@ impl LayeredTimeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    pub fn gc_timeline(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn) -> Result<GcResult> {
-        let now = Instant::now();
+    pub fn gc_timeline(
+        &self,
+        retain_lsns: Vec<Lsn>,
+        cutoff: Lsn,
+        pitr: Duration,
+    ) -> Result<GcResult> {
+        let now = SystemTime::now();
         let mut result: GcResult = Default::default();
         let disk_consistent_lsn = self.get_disk_consistent_lsn();
         let _checkpoint_cs = self.checkpoint_cs.lock().unwrap();
@@ -1703,9 +1717,10 @@ impl LayeredTimeline {
         //
         // Garbage collect the layer if all conditions are satisfied:
         // 1. it is older than cutoff LSN;
-        // 2. it doesn't need to be retained for 'retain_lsns';
-        // 3. newer on-disk layer exists (only for non-dropped segments);
-        // 4. this layer doesn't serve as a tombstone for some older layer;
+        // 2. it is older than PITR interval;
+        // 3. it doesn't need to be retained for 'retain_lsns';
+        // 4. newer on-disk layer exists (only for non-dropped segments);
+        // 5. this layer doesn't serve as a tombstone for some older layer;
         //
         let mut layers = self.layers.lock().unwrap();
         'outer: for l in layers.iter_historic_layers() {
@@ -1743,8 +1758,33 @@ impl LayeredTimeline {
                 }
                 continue 'outer;
             }
-
-            // 2. Is it needed by a child branch?
+            // 2. It is newer than PiTR interval?
+            // We use modification time of layer file to estimate update time.
+            // This estimation is not quite precise but maintaining LSN->timestamp map seems to be overkill.
+            // It is not expected that users will need high precision here. And this estimation
+            // is conservative: modification time of file is always newer than actual time of version
+            // creation. So it is safe for users.
+            //
+            if let Ok(metadata) = fs::metadata(&l.filename()) {
+                let last_modified = metadata.modified()?;
+                if now.duration_since(last_modified)? < pitr {
+                    info!(
+						"keeping {} {}-{} because it's modification time {:?} is newer than PiTR {:?}",
+						seg,
+						l.get_start_lsn(),
+						l.get_end_lsn(),
+						last_modified,
+						pitr
+					);
+                    if seg.rel.is_relation() {
+                        result.ondisk_relfiles_needed_by_pitr += 1;
+                    } else {
+                        result.ondisk_nonrelfiles_needed_by_pitr += 1;
+                    }
+                    continue 'outer;
+                }
+            }
+            // 3. Is it needed by a child branch?
             // NOTE With that wee would keep data that
             // might be referenced by child branches forever.
             // We can track this in child timeline GC and delete parent layers when
@@ -1770,7 +1810,7 @@ impl LayeredTimeline {
                 }
             }
 
-            // 3. Is there a later on-disk layer for this relation?
+            // 4. Is there a later on-disk layer for this relation?
             if !l.is_dropped()
                 && !layers.newer_image_layer_exists(
                     l.get_seg_tag(),
@@ -1792,7 +1832,7 @@ impl LayeredTimeline {
                 continue 'outer;
             }
 
-            // 4. Does this layer serve as a tombstone for some older layer?
+            // 5. Does this layer serve as a tombstone for some older layer?
             if l.is_dropped() {
                 let prior_lsn = l.get_start_lsn().checked_sub(1u64).unwrap();
 
@@ -1898,7 +1938,7 @@ impl LayeredTimeline {
             }
         }
 
-        result.elapsed = now.elapsed();
+        result.elapsed = now.elapsed()?;
         Ok(result)
     }
 

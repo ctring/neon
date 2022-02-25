@@ -27,7 +27,7 @@ use super::models::TenantCreateRequest;
 use crate::branches::BranchInfo;
 use crate::repository::RepositoryTimeline;
 use crate::repository::TimelineSyncState;
-use crate::{branches, config::PageServerConf, tenant_mgr, ZTenantId};
+use crate::{branches, config::PageServerConf, config::TenantConf, tenant_mgr, ZTenantId};
 
 #[derive(Debug)]
 struct State {
@@ -318,9 +318,29 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
 
+    let conf = get_config(&request);
+    let mut tenant_conf = TenantConf::from(conf);
+    if let Some(gc_period) = request_data.gc_period {
+        tenant_conf.gc_period =
+            humantime::parse_duration(&gc_period).map_err(ApiError::from_err)?;
+    }
+    if let Some(gc_horizon) = request_data.gc_horizon {
+        tenant_conf.gc_horizon = gc_horizon;
+    }
+    if let Some(pitr_interval) = request_data.pitr_interval {
+        tenant_conf.pitr_interval =
+            humantime::parse_duration(&pitr_interval).map_err(ApiError::from_err)?;
+    }
+    if let Some(checkpoint_distance) = request_data.checkpoint_distance {
+        tenant_conf.checkpoint_distance = checkpoint_distance;
+    }
+    if let Some(checkpoint_period) = request_data.checkpoint_period {
+        tenant_conf.checkpoint_period =
+            humantime::parse_duration(&checkpoint_period).map_err(ApiError::from_err)?;
+    }
     tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = %request_data.tenant_id).entered();
-        tenant_mgr::create_repository_for_tenant(get_config(&request), request_data.tenant_id)
+        tenant_mgr::create_repository_for_tenant(conf, tenant_conf, request_data.tenant_id)
     })
     .await
     .map_err(ApiError::from_err)??;
