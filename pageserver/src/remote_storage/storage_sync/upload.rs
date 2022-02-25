@@ -13,9 +13,9 @@ use crate::{
     config::PageServerConf,
     remote_storage::{
         storage_sync::{
-            compression,
-            index::{FullTimelineIndexEntry, RemoteTimeline, TimelineIndexEntry},
-            sync_queue, tenant_branch_files, update_index_description, SyncKind, SyncTask,
+            compression, fetch_full_index,
+            index::{RemoteTimeline, TimelineIndexEntry, TimelineIndexEntryInner},
+            sync_queue, tenant_branch_files, SyncKind, SyncTask,
         },
         RemoteStorage, ZTenantTimelineId,
     },
@@ -67,31 +67,24 @@ pub(super) async fn upload_timeline_checkpoint<
     let index_read = index.read().await;
     let remote_timeline = match index_read.timeline_entry(&sync_id) {
         None => None,
-        Some(TimelineIndexEntry::Full(full_entry)) => {
-            Some(Cow::Borrowed(&full_entry.remote_timeline))
-        }
-        Some(TimelineIndexEntry::Description(description_entry)) => {
-            debug!("Found timeline description for the given ids, downloading the full index");
-            match update_index_description(
-                remote_assets.as_ref(),
-                &timeline_dir,
-                sync_id,
-                description_entry.awaits_download,
-            )
-            .await
-            {
-                Ok(remote_timeline) => Some(Cow::Owned(remote_timeline)),
-                Err(e) => {
-                    error!("Failed to download full timeline index: {:?}", e);
-                    sync_queue::push(SyncTask::new(
-                        sync_id,
-                        retries,
-                        SyncKind::Upload(new_checkpoint),
-                    ));
-                    return Some(false);
+        Some(entry) => match entry.inner() {
+            TimelineIndexEntryInner::Full(remote_timeline) => Some(Cow::Borrowed(remote_timeline)),
+            TimelineIndexEntryInner::Description(_) => {
+                debug!("Found timeline description for the given ids, downloading the full index");
+                match fetch_full_index(remote_assets.as_ref(), &timeline_dir, sync_id).await {
+                    Ok(remote_timeline) => Some(Cow::Owned(remote_timeline)),
+                    Err(e) => {
+                        error!("Failed to download full timeline index: {:?}", e);
+                        sync_queue::push(SyncTask::new(
+                            sync_id,
+                            retries,
+                            SyncKind::Upload(new_checkpoint),
+                        ));
+                        return Some(false);
+                    }
                 }
             }
-        }
+        },
     };
 
     let already_contains_upload_lsn = remote_timeline
@@ -122,15 +115,11 @@ pub(super) async fn upload_timeline_checkpoint<
     {
         Ok((archive_header, header_size)) => {
             let mut index_write = index.write().await;
-            match index_write.timeline_entry_mut(&sync_id) {
-                Some(TimelineIndexEntry::Full(full_entry)) => {
-                    full_entry.remote_timeline.update_archive_contents(
-                        new_checkpoint.metadata.disk_consistent_lsn(),
-                        archive_header,
-                        header_size,
-                    );
-                }
-                None | Some(TimelineIndexEntry::Description(_)) => {
+            match index_write
+                .timeline_entry_mut(&sync_id)
+                .map(|e| e.inner_mut())
+            {
+                None => {
                     let mut new_timeline = RemoteTimeline::empty();
                     new_timeline.update_archive_contents(
                         new_checkpoint.metadata.disk_consistent_lsn(),
@@ -139,11 +128,28 @@ pub(super) async fn upload_timeline_checkpoint<
                     );
                     index_write.add_timeline_entry(
                         sync_id,
-                        TimelineIndexEntry::Full(FullTimelineIndexEntry {
-                            remote_timeline: new_timeline,
-                            awaits_download: false, // TODO (current) we need to preserve awaits_download value
-                        }),
+                        TimelineIndexEntry::new(TimelineIndexEntryInner::Full(new_timeline), false),
+                    )
+                }
+                Some(TimelineIndexEntryInner::Full(remote_timeline)) => {
+                    remote_timeline.update_archive_contents(
+                        new_checkpoint.metadata.disk_consistent_lsn(),
+                        archive_header,
+                        header_size,
                     );
+                }
+                Some(TimelineIndexEntryInner::Description(_)) => {
+                    // TODO (current) suspicious, in case for description we do not try to update it first to full entry, why?
+                    let mut new_timeline = RemoteTimeline::empty();
+                    new_timeline.update_archive_contents(
+                        new_checkpoint.metadata.disk_consistent_lsn(),
+                        archive_header,
+                        header_size,
+                    );
+                    index_write.add_timeline_entry(
+                        sync_id,
+                        TimelineIndexEntry::new(TimelineIndexEntryInner::Full(new_timeline), false),
+                    )
                 }
             }
             debug!("Checkpoint uploaded successfully");

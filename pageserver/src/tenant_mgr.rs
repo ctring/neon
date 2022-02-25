@@ -1,7 +1,7 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use crate::branches;
+use crate::branches::{self, CreateRepo};
 use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
 use crate::remote_storage::RemoteTimelineIndex;
@@ -172,7 +172,14 @@ pub fn create_repository_for_tenant(
     remote_index: Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
 ) -> Result<()> {
     let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
-    let repo = branches::create_repo(conf, tenantid, wal_redo_manager, Some(remote_index))?;
+    let repo = branches::create_repo(
+        conf,
+        tenantid,
+        CreateRepo::Real {
+            wal_redo_manager,
+            remote_index,
+        },
+    )?;
 
     match access_tenants().entry(tenantid) {
         hash_map::Entry::Occupied(_) => bail!("tenant {} already exists", tenantid),

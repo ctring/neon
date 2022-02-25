@@ -99,6 +99,24 @@ impl RemoteTimelineIndex {
         self.timeline_entries.insert(id, entry);
     }
 
+    pub fn upgrade_timeline_entry(
+        &mut self,
+        id: &ZTenantTimelineId,
+        remote_timeline: RemoteTimeline,
+    ) -> anyhow::Result<()> {
+        let mut entry = self.timeline_entries.get_mut(id).ok_or(anyhow::anyhow!(
+            "timeline is unexpectedly missing from remote index"
+        ))?;
+
+        if !matches!(entry.inner, TimelineIndexEntryInner::Description(_)) {
+            anyhow::bail!("timeline entry is not a description entry")
+        };
+
+        entry.inner = TimelineIndexEntryInner::Full(remote_timeline);
+
+        Ok(())
+    }
+
     pub fn all_sync_ids(&self) -> impl Iterator<Item = ZTenantTimelineId> + '_ {
         self.timeline_entries.keys().copied()
     }
@@ -139,23 +157,39 @@ pub struct FullTimelineIndexEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TimelineIndexEntry {
-    /// An archive found on the remote storage, but not yet downloaded, only a metadata from its storage path is available, without archive contents.
-    Description(DescriptionTimelineIndexEntry),
-    /// Full archive metadata, including the file list, parsed from the archive header.
-    Full(FullTimelineIndexEntry),
+pub enum TimelineIndexEntryInner {
+    Description(BTreeMap<ArchiveId, ArchiveDescription>),
+    Full(RemoteTimeline),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineIndexEntry {
+    inner: TimelineIndexEntryInner,
+    awaits_download: bool,
 }
 
 impl TimelineIndexEntry {
+    pub fn new(inner: TimelineIndexEntryInner, awaits_download: bool) -> Self {
+        Self {
+            inner,
+            awaits_download,
+        }
+    }
+
+    pub fn inner(&self) -> &TimelineIndexEntryInner {
+        &self.inner
+    }
+
+    pub fn inner_mut(&mut self) -> &mut TimelineIndexEntryInner {
+        &mut self.inner
+    }
+
     pub fn uploaded_checkpoints(&self) -> BTreeSet<Lsn> {
-        match self {
-            Self::Description(description_entry) => description_entry
-                .description
-                .keys()
-                .map(|archive_id| archive_id.0)
-                .collect(),
-            Self::Full(full_entry) => full_entry
-                .remote_timeline
+        match &self.inner {
+            TimelineIndexEntryInner::Description(description) => {
+                description.keys().map(|archive_id| archive_id.0).collect()
+            }
+            TimelineIndexEntryInner::Full(remote_timeline) => remote_timeline
                 .checkpoint_archives
                 .keys()
                 .map(|archive_id| archive_id.0)
@@ -165,14 +199,11 @@ impl TimelineIndexEntry {
 
     /// Gets latest uploaded checkpoint's disk consisten Lsn for the corresponding timeline.
     pub fn disk_consistent_lsn(&self) -> Option<Lsn> {
-        match self {
-            Self::Description(description_entry) => description_entry
-                .description
-                .keys()
-                .map(|archive_id| archive_id.0)
-                .max(),
-            Self::Full(full_entry) => full_entry
-                .remote_timeline
+        match &self.inner {
+            TimelineIndexEntryInner::Description(description) => {
+                description.keys().map(|archive_id| archive_id.0).max()
+            }
+            TimelineIndexEntryInner::Full(remote_timeline) => remote_timeline
                 .checkpoint_archives
                 .keys()
                 .map(|archive_id| archive_id.0)
@@ -181,21 +212,11 @@ impl TimelineIndexEntry {
     }
 
     pub fn get_awaits_download(&self) -> bool {
-        match self {
-            TimelineIndexEntry::Description(entry) => entry.awaits_download,
-            TimelineIndexEntry::Full(entry) => entry.awaits_download,
-        }
+        self.awaits_download
     }
 
     pub fn set_awaits_download(&mut self, awaits_download: bool) {
-        match self {
-            TimelineIndexEntry::Description(description_entry) => {
-                description_entry.awaits_download = awaits_download;
-            }
-            TimelineIndexEntry::Full(full_entry) => {
-                full_entry.awaits_download = awaits_download;
-            }
-        }
+        self.awaits_download = awaits_download;
     }
 }
 
@@ -407,11 +428,14 @@ fn try_parse_index_entry(
                 timeline_id,
             };
             let timeline_index_entry = index.timeline_entries.entry(sync_id).or_insert_with(|| {
-                TimelineIndexEntry::Description(DescriptionTimelineIndexEntry::default())
+                TimelineIndexEntry::new(
+                    TimelineIndexEntryInner::Description(BTreeMap::default()),
+                    false,
+                )
             });
-            match timeline_index_entry {
-                TimelineIndexEntry::Description(description_entry) => {
-                    description_entry.description.insert(
+            match timeline_index_entry.inner_mut() {
+                TimelineIndexEntryInner::Description(description) => {
+                    description.insert(
                         ArchiveId(disk_consistent_lsn),
                         ArchiveDescription {
                             header_size,
@@ -420,7 +444,7 @@ fn try_parse_index_entry(
                         },
                     );
                 }
-                TimelineIndexEntry::Full(_) => {
+                TimelineIndexEntryInner::Full(_) => {
                     bail!("Cannot add parsed archive description to its full context in index with sync id {}", sync_id)
                 }
             }

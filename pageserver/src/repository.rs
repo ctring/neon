@@ -87,7 +87,7 @@ pub trait Repository: Send + Sync {
     fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
 
     // Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
-    fn get_remote_index(&self) -> &Arc<tokio::sync::RwLock<RemoteTimelineIndex>>;
+    fn get_remote_index(&self) -> &tokio::sync::RwLock<RemoteTimelineIndex>;
 }
 
 /// A timeline, that belongs to the current repository.

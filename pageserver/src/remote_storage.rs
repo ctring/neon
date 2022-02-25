@@ -160,7 +160,7 @@ pub fn start_local_timeline_sync(
         .context("Failed to spawn the storage sync thread"),
         None => {
             info!("No remote storage configured, skipping storage sync, considering all local timelines with correct metadata files enabled");
-            let mut local_timeline_init_statuses: LocalTimelineInitStatuses = HashMap::new();
+            let mut local_timeline_init_statuses = LocalTimelineInitStatuses::new();
             for (ZTenantTimelineId { tenant_id, timeline_id }, _) in
                 local_timeline_files
             {

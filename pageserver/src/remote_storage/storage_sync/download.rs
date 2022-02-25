@@ -14,8 +14,8 @@ use crate::{
     layered_repository::metadata::{metadata_path, TimelineMetadata},
     remote_storage::{
         storage_sync::{
-            compression, index::TimelineIndexEntry, sync_queue, tenant_branch_files,
-            update_index_description, SyncKind, SyncTask,
+            compression, fetch_full_index, index::TimelineIndexEntryInner, sync_queue,
+            tenant_branch_files, SyncKind, SyncTask,
         },
         RemoteStorage, ZTenantTimelineId,
     },
@@ -62,24 +62,33 @@ pub(super) async fn download_timeline<
         tenant_id,
         timeline_id,
     } = sync_id;
-    let index_read = remote_assets.1.read().await;
+    let index = &remote_assets.1;
+
+    let index_read = index.read().await;
     let remote_timeline = match index_read.timeline_entry(&sync_id) {
         None => {
-            error!("Cannot download: no timeline is present in the index for given ids");
+            error!("Cannot download: no timeline is present in the index for given id");
             return DownloadedTimeline::Abort;
         }
-        Some(index_entry) => match index_entry {
-            TimelineIndexEntry::Full(full_entry) => Cow::Borrowed(&full_entry.remote_timeline),
-            TimelineIndexEntry::Description(_) => {
+
+        Some(index_entry) => match index_entry.inner() {
+            TimelineIndexEntryInner::Full(remote_timeline) => Cow::Borrowed(remote_timeline),
+            TimelineIndexEntryInner::Description(_) => {
+                if index_entry.get_awaits_download() {
+                    // this indicates a bug, because attach logic should prevent such cases
+                    error!(
+                        "Attempted to concurrently download a timeline. Aborting. sync_id: {}",
+                        sync_id
+                    );
+                    return DownloadedTimeline::Abort;
+                }
                 let remote_disk_consistent_lsn = index_entry.disk_consistent_lsn();
-                let timeline_awaits_download = index_entry.get_awaits_download();
                 drop(index_read);
                 debug!("Found timeline description for the given ids, downloading the full index");
-                match update_index_description(
+                match fetch_full_index(
                     remote_assets.as_ref(),
                     &conf.timeline_path(&timeline_id, &tenant_id),
                     sync_id,
-                    timeline_awaits_download,
                 )
                 .await
                 {
@@ -87,7 +96,7 @@ pub(super) async fn download_timeline<
                     Err(e) => {
                         error!("Failed to download full timeline index: {:?}", e);
                         // TODO (current) confusing place, we save remote_disk_consistent_lsn
-                        //    then try to update_remote_index_description,
+                        //    then try to fetch_full_index,
                         //    and then decide what to do based on previous presence of remote_disk_consistent_lsn
                         //    shoulnt we check retry count instead?
 
@@ -145,7 +154,7 @@ pub(super) async fn download_timeline<
             conf,
             sync_id,
             Arc::clone(&remote_assets),
-            remote_timeline.as_ref(),
+            &remote_timeline,
             archive_id,
             Arc::clone(&download.files_to_skip),
         )

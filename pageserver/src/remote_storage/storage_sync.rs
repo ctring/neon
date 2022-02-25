@@ -100,7 +100,7 @@ use tracing::*;
 use self::{
     compression::ArchiveHeader,
     download::{download_timeline, DownloadedTimeline},
-    index::{ArchiveDescription, ArchiveId, FullTimelineIndexEntry, RelativePath, RemoteTimeline},
+    index::{ArchiveDescription, ArchiveId, RelativePath, RemoteTimeline, TimelineIndexEntryInner},
     upload::upload_timeline_checkpoint,
 };
 use super::{
@@ -648,7 +648,7 @@ fn schedule_first_sync_tasks(
     index: &mut RemoteTimelineIndex,
     local_timeline_files: HashMap<ZTenantTimelineId, (TimelineMetadata, Vec<PathBuf>)>,
 ) -> LocalTimelineInitStatuses {
-    let mut local_timeline_init_statuses: LocalTimelineInitStatuses = HashMap::new();
+    let mut local_timeline_init_statuses = LocalTimelineInitStatuses::new();
 
     let mut new_sync_tasks =
         VecDeque::with_capacity(local_timeline_files.len().max(local_timeline_files.len()));
@@ -773,22 +773,23 @@ fn register_sync_status(sync_start: Instant, sync_name: &str, sync_status: Optio
     .observe(secs_elapsed)
 }
 
-async fn update_index_description<
+async fn fetch_full_index<
     P: Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     (storage, index): &(S, Arc<RwLock<RemoteTimelineIndex>>),
     timeline_dir: &Path,
     id: ZTenantTimelineId,
-    timeline_awaits_download: bool, // TODO (current) not that clear, is there a better option?
 ) -> anyhow::Result<RemoteTimeline> {
-    let mut index_write = index.write().await;
-    let full_index = match index_write.timeline_entry(&id) {
+    let index_read = index.read().await;
+    let full_index = match index_read.timeline_entry(&id).map(|e| e.inner()) {
         None => bail!("Timeline not found for sync id {}", id),
-        Some(TimelineIndexEntry::Full(_)) => bail!("Index is already populated for sync id {}", id),
-        Some(TimelineIndexEntry::Description(description_entry)) => {
+        Some(TimelineIndexEntryInner::Full(_)) => {
+            bail!("Index is already populated for sync id {}", id)
+        }
+        Some(TimelineIndexEntryInner::Description(description)) => {
             let mut archive_header_downloads = FuturesUnordered::new();
-            for (archive_id, description) in &description_entry.description {
+            for (archive_id, description) in description {
                 archive_header_downloads.push(async move {
                     let header = download_archive_header(storage, timeline_dir, description)
                         .await
@@ -800,24 +801,22 @@ async fn update_index_description<
             let mut full_index = RemoteTimeline::empty();
             while let Some(header_data) = archive_header_downloads.next().await {
                 match header_data {
-                        Ok((archive_id, header_size, header)) => full_index.update_archive_contents(archive_id.0, header, header_size),
-                        Err((e, archive_id)) => bail!(
-                            "Failed to download archive header for tenant {}, timeline {}, archive for Lsn {}: {}",
-                            id.tenant_id, id.timeline_id, archive_id.0,
-                            e
-                        ),
-                    }
+                    Ok((archive_id, header_size, header)) => full_index.update_archive_contents(archive_id.0, header, header_size),
+                    Err((e, archive_id)) => bail!(
+                        "Failed to download archive header for tenant {}, timeline {}, archive for Lsn {}: {}",
+                        id.tenant_id, id.timeline_id, archive_id.0,
+                        e
+                    ),
+                }
             }
             full_index
         }
     };
-    index_write.add_timeline_entry(
-        id,
-        TimelineIndexEntry::Full(FullTimelineIndexEntry {
-            remote_timeline: full_index.clone(),
-            awaits_download: timeline_awaits_download,
-        }),
-    );
+    drop(index_read); // tokio rw lock is not upgradeable
+    let mut index_write = index.write().await;
+    index_write
+        .upgrade_timeline_entry(&id, full_index.clone())
+        .context("cannot upgrade timeline entry in remote index")?;
     Ok(full_index)
 }
 
@@ -945,10 +944,13 @@ mod test_utils {
         index: &Arc<RwLock<RemoteTimelineIndex>>,
         sync_id: ZTenantTimelineId,
     ) -> RemoteTimeline {
-        if let Some(TimelineIndexEntry::Full(full_entry)) =
-            index.read().await.timeline_entry(&sync_id)
+        if let Some(TimelineIndexEntryInner::Full(remote_timeline)) = index
+            .read()
+            .await
+            .timeline_entry(&sync_id)
+            .map(|e| e.inner())
         {
-            full_entry.remote_timeline.clone()
+            remote_timeline.clone()
         } else {
             panic!(
                 "Expect to have a full remote timeline in the index for sync id {}",
@@ -1024,29 +1026,26 @@ mod test_utils {
                         sync_id
                     )
                 });
-            let expected_timeline_description = match expected_timeline_description {
-                TimelineIndexEntry::Description(description_entry) => description_entry.description,
-                TimelineIndexEntry::Full(_) => panic!("Expected index entry for sync id {} is a full entry, while a description was expected", sync_id),
+            let expected_timeline_description = match expected_timeline_description.inner() {
+                TimelineIndexEntryInner::Description(description) => description,
+                TimelineIndexEntryInner::Full(_) => panic!("Expected index entry for sync id {} is a full entry, while a description was expected", sync_id),
             };
 
-            match actual_timeline_entry {
-                TimelineIndexEntry::Description(actual_descriptions_entry) => {
+            match actual_timeline_entry.inner() {
+                TimelineIndexEntryInner::Description(description) => {
                     assert_eq!(
-                        actual_descriptions_entry.description, expected_timeline_description,
+                        description, expected_timeline_description,
                         "Index contains unexpected descriptions entry for sync id {}",
                         sync_id
                     )
                 }
-                TimelineIndexEntry::Full(actual_full_entry) => {
+                TimelineIndexEntryInner::Full(remote_timeline) => {
                     let expected_lsns = expected_timeline_description
                         .values()
                         .map(|description| description.disk_consistent_lsn)
                         .collect::<BTreeSet<_>>();
                     assert_eq!(
-                        actual_full_entry
-                            .remote_timeline
-                            .checkpoints()
-                            .collect::<BTreeSet<_>>(),
+                        remote_timeline.checkpoints().collect::<BTreeSet<_>>(),
                         expected_lsns,
                         "Timeline {} should have the same checkpoints uploaded",
                         sync_id,

@@ -145,7 +145,7 @@ impl Repository for LayeredRepository {
     fn get_timeline(&self, timelineid: ZTimelineId) -> Option<RepositoryTimeline> {
         let timelines = self.timelines.lock().unwrap();
         self.get_timeline_internal(timelineid, &timelines)
-            .map(Into::into)
+            .map(RepositoryTimeline::from)
     }
 
     fn get_timeline_load(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
@@ -339,8 +339,8 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    fn get_remote_index(&self) -> &Arc<tokio::sync::RwLock<RemoteTimelineIndex>> {
-        &self.remote_index
+    fn get_remote_index(&self) -> &tokio::sync::RwLock<RemoteTimelineIndex> {
+        self.remote_index.as_ref()
     }
 }
 
@@ -2345,9 +2345,8 @@ mod tests {
         metadata_bytes[512 - 4 - 2] ^= 1;
         std::fs::write(metadata_path, metadata_bytes)?;
 
-        let new_repo = harness.load();
-        let err = new_repo.get_timeline(TIMELINE_ID).err().unwrap();
-        assert_eq!(err.to_string(), "failed to load metadata");
+        let err = harness.try_load().err().expect("should fail");
+        assert_eq!(err.to_string(), "failed to load local metadata");
         assert_eq!(
             err.source().unwrap().to_string(),
             "metadata checksum mismatch"
@@ -2437,7 +2436,7 @@ mod tests {
         // Load the timeline. This will cause the files in the "future" to be renamed
         // away.
         let new_repo = harness.load();
-        new_repo.get_timeline(TIMELINE_ID).unwrap();
+        new_repo.get_timeline_load(TIMELINE_ID).unwrap();
         drop(new_repo);
 
         for filename in future_filenames.iter() {
@@ -2454,7 +2453,7 @@ mod tests {
         }
 
         let new_repo = harness.load();
-        new_repo.get_timeline(TIMELINE_ID).unwrap();
+        new_repo.get_timeline_load(TIMELINE_ID).unwrap();
         drop(new_repo);
 
         for filename in future_filenames.iter() {

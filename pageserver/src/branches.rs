@@ -129,22 +129,11 @@ pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str
     // use true as daemonize parameter because otherwise we pollute zenith cli output with a few pages long output of info messages
     let _log_file = logging::init(LOG_FILE_NAME, true)?;
 
-    // We don't use the real WAL redo manager, because we don't want to spawn the WAL redo
-    // process during repository initialization.
-    //
-    // FIXME: That caused trouble, because the WAL redo manager spawned a thread that launched
-    // initdb in the background, and it kept running even after the "zenith init" had exited.
-    // In tests, we started the  page server immediately after that, so that initdb was still
-    // running in the background, and we failed to run initdb again in the same directory. This
-    // has been solved for the rapid init+start case now, but the general race condition remains
-    // if you restart the server quickly. The WAL redo manager doesn't use a separate thread
-    // anymore, but I think that could still happen.
-    let dummy_redo_mgr = Arc::new(crate::walredo::DummyRedoManager {});
-
     if let Some(tenantid) = create_tenant {
         let tenantid = ZTenantId::from_str(tenantid)?;
         println!("initializing tenantid {}", tenantid);
-        create_repo(conf, tenantid, dummy_redo_mgr, None).context("failed to create repo")?;
+
+        create_repo(conf, tenantid, CreateRepo::Dummy).context("failed to create repo")?;
     }
     crashsafe_dir::create_dir_all(conf.tenants_path())?;
 
@@ -152,19 +141,43 @@ pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str
     Ok(())
 }
 
+pub enum CreateRepo {
+    Real {
+        wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
+        remote_index: Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
+    },
+    Dummy,
+}
+
 // When no remote index is passed it means that this is temporary instantiation.
 // For example from init_pageserver with create_tenant=True
 pub fn create_repo(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
-    wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-    remote_index: Option<Arc<tokio::sync::RwLock<RemoteTimelineIndex>>>,
+    create_repo: CreateRepo,
 ) -> Result<Arc<dyn Repository>> {
-    // safety check, both should be Some or None
-    assert!(
-        (conf.remote_storage_config.is_some() && remote_index.is_some())
-            || (conf.remote_storage_config.is_none() && remote_index.is_none())
-    );
+    let (wal_redo_manager, remote_index) = match create_repo {
+        CreateRepo::Real {
+            wal_redo_manager,
+            remote_index,
+        } => (wal_redo_manager, remote_index),
+        CreateRepo::Dummy => {
+            // We don't use the real WAL redo manager, because we don't want to spawn the WAL redo
+            // process during repository initialization.
+            //
+            // FIXME: That caused trouble, because the WAL redo manager spawned a thread that launched
+            // initdb in the background, and it kept running even after the "zenith init" had exited.
+            // In tests, we started the  page server immediately after that, so that initdb was still
+            // running in the background, and we failed to run initdb again in the same directory. This
+            // has been solved for the rapid init+start case now, but the general race condition remains
+            // if you restart the server quickly. The WAL redo manager doesn't use a separate thread
+            // anymore, but I think that could still happen.
+            let wal_redo_manager = Arc::new(crate::walredo::DummyRedoManager {});
+
+            let remote_index = Arc::new(tokio::sync::RwLock::new(RemoteTimelineIndex::empty()));
+            (wal_redo_manager as _, remote_index)
+        }
+    };
 
     let repo_dir = conf.tenant_path(&tenantid);
     if repo_dir.exists() {
@@ -191,8 +204,7 @@ pub fn create_repo(
         conf,
         wal_redo_manager,
         tenantid,
-        remote_index
-            .unwrap_or_else(|| Arc::new(tokio::sync::RwLock::new(RemoteTimelineIndex::empty()))),
+        remote_index,
         conf.remote_storage_config.is_some(),
     ));
 

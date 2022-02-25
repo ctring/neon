@@ -20,7 +20,6 @@ use postgres_types::PgLsn;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread_local;
 use std::time::SystemTime;
@@ -193,7 +192,7 @@ fn walreceiver_main(
         )
     })?;
 
-    let remote_index = Arc::clone(repo.get_remote_index());
+    let remote_index = repo.get_remote_index();
 
     //
     // Start streaming the WAL, from where we left off previously.
