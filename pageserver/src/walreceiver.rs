@@ -296,18 +296,20 @@ fn walreceiver_main(
         };
 
         if let Some(last_lsn) = status_update {
-            let timeline_remote_consistent_lsn =
-                runtime.block_on(async {
-                    remote_index
+            let timeline_remote_consistent_lsn = runtime.block_on(async {
+                remote_index
                     .read()
                     .await
-                    .timeline_entry(&ZTenantTimelineId { tenant_id, timeline_id })
-                    .expect(
-                        "timeline was deleted from remote index while walreceiver is still active",
-                    )
-                    .disk_consistent_lsn()
+                    // here we either do not have this timeline in remote index, TODO (current) is it a problem?
+                    // or there were no checkpoints for it yet
+                    .timeline_entry(&ZTenantTimelineId {
+                        tenant_id,
+                        timeline_id,
+                    })
+                    .map(|e| e.disk_consistent_lsn())
+                    .flatten()
                     .unwrap_or(Lsn(0)) // no checkpoint was uploaded
-                });
+            });
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);

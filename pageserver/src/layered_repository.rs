@@ -405,24 +405,22 @@ impl LayeredRepository {
         timelineid: ZTimelineId,
         timelines: &mut HashMap<ZTimelineId, LayeredTimelineEntry>,
     ) -> anyhow::Result<Option<Arc<LayeredTimeline>>> {
+        // TODO (current) unit test for that
         match timelines.get(&timelineid) {
-            Some(timeline) => {
-                match timeline {
-                    LayeredTimelineEntry::Loaded(local_timeline) => {
-                        Ok(Some(Arc::clone(local_timeline)))
-                    }
-                    LayeredTimelineEntry::Unloaded { .. } => {
-                        // TODO we do loading while holding the lock, this is bad
-                        //  but currently there is no easy way to workaround it because loading is recursive to ancestors (all of them)
-                        //  solution might be to use some sort of lazy timeline handle for ancestor but it can hide the problem instead of solving it
-                        //  Another option is to collect all ancestors, release the lock then load them and then update status,
-                        //  but that opens the posibility for races e.g. concurrent loading. Needs to be investigated further.
-                        Ok(Some(self.load_local_timeline(timelineid, timelines)?))
-                    }
+            Some(entry) => match entry {
+                LayeredTimelineEntry::Loaded(local_timeline) => {
+                    return Ok(Some(Arc::clone(local_timeline)))
                 }
-            }
-            None => Ok(None),
-        }
+                LayeredTimelineEntry::Unloaded { .. } => {}
+            },
+            None => return Ok(None),
+        };
+        let timeline = self.load_local_timeline(timelineid, timelines)?;
+        timelines.insert(
+            timelineid,
+            LayeredTimelineEntry::Loaded(Arc::clone(&timeline)),
+        );
+        Ok(Some(timeline))
     }
 
     fn load_local_timeline(
@@ -437,12 +435,13 @@ impl LayeredRepository {
         let ancestor = metadata
             .ancestor_timeline()
             .map(|ancestor_timelineid| {
-                self.get_timeline_internal(ancestor_timelineid, timelines)
-                    .ok_or(anyhow::anyhow!(
-                        "failed to get ancestor timeline, this is a bug"
-                    ))
+                self.get_timeline_load_internal(ancestor_timelineid, timelines)
             })
-            .transpose()?;
+            .transpose()
+            .context("cannot load ancestor timeline")?
+            .flatten()
+            // TODO (current) can there be unloaded ancestor? maybe change ancestor to just Arc<LayeredTimeline>
+            .map(LayeredTimelineEntry::Loaded);
         let _enter =
             info_span!("loading timeline", timeline = %timelineid, tenant = %self.tenantid)
                 .entered();
