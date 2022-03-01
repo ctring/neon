@@ -5,19 +5,25 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{bail, ensure, Context, Result};
+use serde::{Deserialize, Serialize};
 use toml_edit;
 use toml_edit::{Document, Item};
+use tracing::*;
+use zenith_utils::bin_ser::BeSer;
 use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use std::convert::TryInto;
 use std::env;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
 use crate::layered_repository::TIMELINES_SEGMENT_NAME;
+use crate::virtual_file::VirtualFile;
 
 pub mod defaults {
     use const_format::formatcp;
@@ -121,7 +127,9 @@ pub struct PageServerConf {
     pub remote_storage_config: Option<RemoteStorageConfig>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub const TENANT_CONFIG_NAME: &str = "config";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantConf {
     pub checkpoint_distance: u64,
     pub checkpoint_period: Duration,
@@ -138,6 +146,30 @@ impl TenantConf {
             pitr_interval: conf.pitr_interval,
             checkpoint_distance: conf.checkpoint_distance,
             checkpoint_period: conf.checkpoint_period,
+        }
+    }
+
+    pub fn save(&self, conf: &'static PageServerConf, tenantid: ZTenantId) -> Result<()> {
+        let _enter = info_span!("saving tenant config").entered();
+        let path = conf.tenant_path(&tenantid).join(TENANT_CONFIG_NAME);
+        let mut file =
+            VirtualFile::open_with_options(&path, OpenOptions::new().write(true).create_new(true))?;
+        let config_bytes = self.ser()?;
+        if file.write(&config_bytes)? != config_bytes.len() {
+            bail!("Could not write all the metadata bytes in a single call");
+        }
+        file.sync_all()?;
+        Ok(())
+    }
+
+    pub fn load(conf: &'static PageServerConf, tenantid: ZTenantId) -> Result<TenantConf> {
+        let _enter = info_span!("loading tenant config").entered();
+        let path = conf.tenant_path(&tenantid).join(TENANT_CONFIG_NAME);
+        let content = std::fs::read(&path);
+        match content {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::from(conf)),
+            Ok(config_bytes) => Ok(TenantConf::des(&config_bytes)?),
+            Err(err) => bail!(err),
         }
     }
 }

@@ -78,16 +78,21 @@ pub fn set_timeline_states(
             let walredo_mgr = PostgresRedoManager::new(conf, tenant_id);
 
             // Set up an object repository, for actual data storage.
-            let repo: Arc<dyn Repository> = Arc::new(LayeredRepository::new(
-                conf,
-                TenantConf::from(conf),
-                Arc::new(walredo_mgr),
-                tenant_id,
-                conf.remote_storage_config.is_some(),
-            ));
-            Tenant {
-                state: TenantState::Idle,
-                repo,
+            match TenantConf::load(conf, tenant_id) {
+                Ok(tenant_conf) => {
+                    let repo: Arc<dyn Repository> = Arc::new(LayeredRepository::new(
+                        conf,
+                        tenant_conf,
+                        Arc::new(walredo_mgr),
+                        tenant_id,
+                        conf.remote_storage_config.is_some(),
+                    ));
+                    Tenant {
+                        state: TenantState::Idle,
+                        repo,
+                    }
+                }
+                Err(e) => panic!("Failed to load tenant state: {:?}", e),
             }
         });
         if let Err(e) = put_timelines_into_tenant(tenant, tenant_id, timeline_states) {

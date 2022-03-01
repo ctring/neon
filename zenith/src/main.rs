@@ -136,7 +136,10 @@ fn main() -> Result<()> {
             .setting(AppSettings::ArgRequiredElseHelp)
             .about("Manage tenants")
             .subcommand(App::new("list"))
-            .subcommand(App::new("create").arg(Arg::new("tenantid").required(false).index(1)))
+				.subcommand(App::new("create")
+							.arg(Arg::new("tenantid").required(false).index(1))
+							.arg(Arg::new("config").short('c').takes_value(true).multiple_occurrences(true).required(false))
+				)
         )
         .subcommand(
             App::new("pageserver")
@@ -446,8 +449,12 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
                 Some(tenantid) => ZTenantId::from_str(tenantid)?,
                 None => ZTenantId::generate(),
             };
+            let tenant_conf: HashMap<_, _> = create_match
+                .values_of("config")
+                .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
+                .unwrap_or(HashMap::new());
             println!("using tenant id {}", tenantid);
-            pageserver.tenant_create(tenantid)?;
+            pageserver.tenant_create(tenantid, tenant_conf)?;
             println!("tenant successfully created on the pageserver");
         }
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),

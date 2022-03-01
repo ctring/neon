@@ -154,6 +154,7 @@ pub fn create_repo(
 
     crashsafe_dir::create_dir(&timelinedir)?;
 
+    tenant_conf.save(conf, tenantid)?;
     let repo = Arc::new(crate::layered_repository::LayeredRepository::new(
         conf,
         tenant_conf,
