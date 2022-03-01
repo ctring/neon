@@ -452,7 +452,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
             let tenant_conf: HashMap<_, _> = create_match
                 .values_of("config")
                 .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
-                .unwrap_or(HashMap::new());
+                .unwrap_or_default();
             println!("using tenant id {}", tenantid);
             pageserver.tenant_create(tenantid, tenant_conf)?;
             println!("tenant successfully created on the pageserver");
