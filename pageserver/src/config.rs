@@ -15,7 +15,7 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use std::convert::TryInto;
 use std::env;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
@@ -159,6 +159,12 @@ impl TenantConf {
             bail!("Could not write all the metadata bytes in a single call");
         }
         file.sync_all()?;
+        let tenant_dir = File::open(
+            &path
+                .parent()
+                .expect("Tetant config should always have a parent dir"),
+        )?;
+        tenant_dir.sync_all()?;
         Ok(())
     }
 
