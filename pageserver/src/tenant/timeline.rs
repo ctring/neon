@@ -1568,6 +1568,10 @@ impl Timeline {
             .tenant_conf
             .max_lsn_wal_lag
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
+        let ingest_batch_size = tenant_conf_guard
+            .tenant_conf
+            .ingest_batch_size
+            .unwrap_or(self.conf.default_tenant_conf.ingest_batch_size);
         drop(tenant_conf_guard);
 
         let mut guard = self.walreceiver.lock().unwrap();
@@ -1583,6 +1587,7 @@ impl Timeline {
                 max_lsn_wal_lag,
                 auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
                 availability_zone: self.conf.availability_zone.clone(),
+                ingest_batch_size,
             },
             broker_client,
             ctx,
@@ -2414,9 +2419,33 @@ impl Timeline {
         Ok(())
     }
 
+    async fn put_values(
+        &self,
+        values: &HashMap<Key, Vec<(Lsn, Value)>>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        // Pick the first LSN in the batch to get the layer to write to.
+        for lsns in values.values() {
+            if let Some((lsn, _)) = lsns.first() {
+                let layer = self.get_layer_for_write(*lsn).await?;
+                layer.put_values(values, ctx).await?;
+                break;
+            }
+        }
+        Ok(())
+    }
+
     async fn put_tombstone(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
         let layer = self.get_layer_for_write(lsn).await?;
         layer.put_tombstone(key_range, lsn).await?;
+        Ok(())
+    }
+
+    async fn put_tombstones(&self, tombstones: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
+        if let Some((_, lsn)) = tombstones.first() {
+            let layer = self.get_layer_for_write(*lsn).await?;
+            layer.put_tombstones(tombstones).await?;
+        }
         Ok(())
     }
 
@@ -4438,8 +4467,20 @@ impl<'a> TimelineWriter<'a> {
         self.tl.put_value(key, lsn, value, ctx).await
     }
 
+    pub async fn put_batch(
+        &self,
+        batch: &HashMap<Key, Vec<(Lsn, Value)>>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.tl.put_values(batch, ctx).await
+    }
+
     pub async fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
         self.tl.put_tombstone(key_range, lsn).await
+    }
+
+    pub async fn delete_batch(&self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
+        self.tl.put_tombstones(batch).await
     }
 
     /// Track the end of the latest digested WAL record.

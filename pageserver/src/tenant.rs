@@ -3682,6 +3682,7 @@ pub(crate) mod harness {
                     tenant_conf.evictions_low_residence_duration_metric_threshold,
                 ),
                 gc_feedback: Some(tenant_conf.gc_feedback),
+                ingest_batch_size: Some(tenant_conf.ingest_batch_size),
             }
         }
     }

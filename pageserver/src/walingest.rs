@@ -83,10 +83,11 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         decoded: &mut DecodedWALRecord,
         ctx: &RequestContext,
+        commit: bool,
     ) -> anyhow::Result<()> {
         let pg_version = modification.tline.pg_version;
 
-        modification.lsn = lsn;
+        modification.set_lsn(lsn)?;
         decode_wal_record(recdata, decoded, pg_version)?;
 
         let mut buf = decoded.record.clone();
@@ -368,7 +369,9 @@ impl WalIngest {
 
         // Now that this record has been fully handled, including updating the
         // checkpoint data, let the repository know that it is up-to-date to this LSN
-        modification.commit(ctx).await?;
+        if commit {
+            modification.commit(ctx).await?;
+        }
 
         Ok(())
     }
@@ -2171,7 +2174,7 @@ mod tests {
             decoder.feed_bytes(chunk);
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx, true)
                     .await
                     .unwrap();
             }
