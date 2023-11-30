@@ -53,6 +53,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
 use crate::metrics::LIVE_CONNECTIONS_COUNT;
+use crate::pgdatadir_mapping::Version;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -741,7 +742,7 @@ impl PageServerHandler {
                 .await?;
 
         let exists = timeline
-            .get_rel_exists(req.rel, lsn, req.latest, ctx)
+            .get_rel_exists(req.rel, Version::Lsn(lsn), req.latest, ctx)
             .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
@@ -760,7 +761,9 @@ impl PageServerHandler {
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
                 .await?;
 
-        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest, ctx).await?;
+        let n_blocks = timeline
+            .get_rel_size(req.rel, Version::Lsn(lsn), req.latest, ctx)
+            .await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
@@ -779,7 +782,13 @@ impl PageServerHandler {
                 .await?;
 
         let total_blocks = timeline
-            .get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest, ctx)
+            .get_db_size(
+                DEFAULTTABLESPACE_OID,
+                req.dbnode,
+                Version::Lsn(lsn),
+                req.latest,
+                ctx,
+            )
             .await?;
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
@@ -808,7 +817,7 @@ impl PageServerHandler {
         */
 
         let page = timeline
-            .get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest, ctx)
+            .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), req.latest, ctx)
             .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
