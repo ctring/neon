@@ -1199,7 +1199,7 @@ background_task_maximum_delay = '334 s'
                 control_plane_api: None,
                 control_plane_api_token: None,
                 control_plane_emergency_mode: false,
-                ingest_batch_size: 1,
+                ingest_batch_size: 100,
             },
             "Should be able to parse all basic config values correctly"
         );
