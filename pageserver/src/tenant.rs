@@ -3938,7 +3938,10 @@ mod tests {
                 &ctx,
             )
             .await?;
-        writer.finish_write(Lsn(0x10));
+        writer.finish_write(RecordLsn {
+            last: Lsn(0x10),
+            prev: Lsn::INVALID,
+        });
         drop(writer);
 
         let writer = tline.writer().await;
@@ -3950,7 +3953,10 @@ mod tests {
                 &ctx,
             )
             .await?;
-        writer.finish_write(Lsn(0x20));
+        writer.finish_write(RecordLsn {
+            last: Lsn(0x20),
+            prev: Lsn::INVALID,
+        });
         drop(writer);
 
         assert_eq!(
@@ -4027,16 +4033,25 @@ mod tests {
         writer
             .put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"), &ctx)
             .await?;
-        writer.finish_write(Lsn(0x20));
+        writer.finish_write(RecordLsn {
+            last: Lsn(0x20),
+            prev: Lsn::INVALID,
+        });
 
         writer
             .put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"), &ctx)
             .await?;
-        writer.finish_write(Lsn(0x30));
+        writer.finish_write(RecordLsn {
+            last: Lsn(0x30),
+            prev: Lsn::INVALID,
+        });
         writer
             .put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"), &ctx)
             .await?;
-        writer.finish_write(Lsn(0x40));
+        writer.finish_write(RecordLsn {
+            last: Lsn(0x40),
+            prev: Lsn::INVALID,
+        });
 
         //assert_current_logical_size(&tline, Lsn(0x40));
 
@@ -4051,7 +4066,10 @@ mod tests {
         new_writer
             .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"), &ctx)
             .await?;
-        new_writer.finish_write(Lsn(0x40));
+        new_writer.finish_write(RecordLsn {
+            last: Lsn(0x40),
+            prev: Lsn::INVALID,
+        });
 
         // Check page contents on both branches
         assert_eq!(
@@ -4090,7 +4108,10 @@ mod tests {
                     ctx,
                 )
                 .await?;
-            writer.finish_write(lsn);
+            writer.finish_write(RecordLsn {
+                last: lsn,
+                prev: Lsn::INVALID,
+            });
             lsn += 0x10;
             writer
                 .put(
@@ -4100,7 +4121,10 @@ mod tests {
                     ctx,
                 )
                 .await?;
-            writer.finish_write(lsn);
+            writer.finish_write(RecordLsn {
+                last: lsn,
+                prev: Lsn::INVALID,
+            });
             lsn += 0x10;
         }
         tline.freeze_and_flush().await?;
@@ -4114,7 +4138,10 @@ mod tests {
                     ctx,
                 )
                 .await?;
-            writer.finish_write(lsn);
+            writer.finish_write(RecordLsn {
+                last: lsn,
+                prev: Lsn::INVALID,
+            });
             lsn += 0x10;
             writer
                 .put(
@@ -4124,7 +4151,10 @@ mod tests {
                     ctx,
                 )
                 .await?;
-            writer.finish_write(lsn);
+            writer.finish_write(RecordLsn {
+                last: lsn,
+                prev: Lsn::INVALID,
+            });
         }
         tline.freeze_and_flush().await
     }
@@ -4531,7 +4561,10 @@ mod tests {
                 &ctx,
             )
             .await?;
-        writer.finish_write(Lsn(0x10));
+        writer.finish_write(RecordLsn {
+            last: Lsn(0x10),
+            prev: Lsn::INVALID,
+        });
         drop(writer);
 
         tline.freeze_and_flush().await?;
@@ -4548,7 +4581,10 @@ mod tests {
                 &ctx,
             )
             .await?;
-        writer.finish_write(Lsn(0x20));
+        writer.finish_write(RecordLsn {
+            last: Lsn(0x20),
+            prev: Lsn::INVALID,
+        });
         drop(writer);
 
         tline.freeze_and_flush().await?;
@@ -4565,7 +4601,10 @@ mod tests {
                 &ctx,
             )
             .await?;
-        writer.finish_write(Lsn(0x30));
+        writer.finish_write(RecordLsn {
+            last: Lsn(0x30),
+            prev: Lsn::INVALID,
+        });
         drop(writer);
 
         tline.freeze_and_flush().await?;
@@ -4582,7 +4621,10 @@ mod tests {
                 &ctx,
             )
             .await?;
-        writer.finish_write(Lsn(0x40));
+        writer.finish_write(RecordLsn {
+            last: Lsn(0x40),
+            prev: Lsn::INVALID,
+        });
         drop(writer);
 
         tline.freeze_and_flush().await?;
@@ -4644,7 +4686,10 @@ mod tests {
                         &ctx,
                     )
                     .await?;
-                writer.finish_write(lsn);
+                writer.finish_write(RecordLsn {
+                    last: lsn,
+                    prev: Lsn::INVALID,
+                });
                 drop(writer);
 
                 keyspace.add_key(test_key);
@@ -4706,7 +4751,10 @@ mod tests {
                     &ctx,
                 )
                 .await?;
-            writer.finish_write(lsn);
+            writer.finish_write(RecordLsn {
+                last: lsn,
+                prev: Lsn::INVALID,
+            });
             updated[blknum] = lsn;
             drop(writer);
 
@@ -4727,7 +4775,10 @@ mod tests {
                         &ctx,
                     )
                     .await?;
-                writer.finish_write(lsn);
+                writer.finish_write(RecordLsn {
+                    last: lsn,
+                    prev: Lsn::INVALID,
+                });
                 drop(writer);
                 updated[blknum] = lsn;
             }
@@ -4795,7 +4846,10 @@ mod tests {
                     &ctx,
                 )
                 .await?;
-            writer.finish_write(lsn);
+            writer.finish_write(RecordLsn {
+                last: lsn,
+                prev: Lsn::INVALID,
+            });
             updated[blknum] = lsn;
             drop(writer);
 
@@ -4825,7 +4879,10 @@ mod tests {
                     )
                     .await?;
                 println!("updating {} at {}", blknum, lsn);
-                writer.finish_write(lsn);
+                writer.finish_write(RecordLsn {
+                    last: lsn,
+                    prev: Lsn::INVALID,
+                });
                 drop(writer);
                 updated[blknum] = lsn;
             }
@@ -4902,7 +4959,10 @@ mod tests {
                     )
                     .await?;
                 println!("updating [{}][{}] at {}", idx, blknum, lsn);
-                writer.finish_write(lsn);
+                writer.finish_write(RecordLsn {
+                    last: lsn,
+                    prev: Lsn::INVALID,
+                });
                 drop(writer);
                 updated[idx][blknum] = lsn;
             }
