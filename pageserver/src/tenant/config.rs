@@ -336,7 +336,6 @@ pub struct TenantConf {
     #[serde(with = "humantime_serde")]
     pub evictions_low_residence_duration_metric_threshold: Duration,
     pub gc_feedback: bool,
-    pub ingest_batch_size: NonZeroU64,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -417,10 +416,6 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub gc_feedback: Option<bool>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    pub ingest_batch_size: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -489,9 +484,6 @@ impl TenantConfOpt {
                 .evictions_low_residence_duration_metric_threshold
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
             gc_feedback: self.gc_feedback.unwrap_or(global_conf.gc_feedback),
-            ingest_batch_size: self
-                .ingest_batch_size
-                .unwrap_or(global_conf.ingest_batch_size),
         }
     }
 }
@@ -529,8 +521,6 @@ impl Default for TenantConf {
             )
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
             gc_feedback: false,
-            ingest_batch_size: NonZeroU64::new(DEFAULT_INGEST_BATCH_SIZE)
-                .expect("cannot parse default ingest_batch_size"),
         }
     }
 }
