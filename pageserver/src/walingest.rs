@@ -54,7 +54,7 @@ impl WalIngest {
     pub async fn new(
         timeline: &Timeline,
         startpoint: Lsn,
-        ctx: &'_ RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
@@ -83,7 +83,6 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         decoded: &mut DecodedWALRecord,
         ctx: &RequestContext,
-        commit: bool,
     ) -> anyhow::Result<()> {
         let pg_version = modification.tline.pg_version;
 
@@ -367,11 +366,9 @@ impl WalIngest {
             self.checkpoint_modified = false;
         }
 
-        // Now that this record has been fully handled, including updating the
-        // checkpoint data, let the repository know that it is up-to-date to this LSN
-        if commit {
-            modification.commit(ctx).await?;
-        }
+        // Note that at this point this record is only cached in the modification
+        // until commit() is called to flush the data into the repository and update
+        // the latest LSN.
 
         Ok(())
     }
@@ -2174,10 +2171,11 @@ mod tests {
             decoder.feed_bytes(chunk);
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx, true)
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
                     .await
                     .unwrap();
             }
+            modification.commit(&ctx).await.unwrap();
         }
 
         let duration = started_at.elapsed();
